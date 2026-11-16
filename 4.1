@@ -1,32 +1,6 @@
 clear; clc; close all;
 
-%% ============================================================
-%  Parareal temporal convergence test
-%
-%  PDE:
-%      u_t - d*u_xx = alpha*u,    0 < x < 1
-%
-%  Initial condition:
-%      u(x,0) = sin(pi*x) + 0.5*sin(2*pi*x)
-%
-%  Available propagators:
-%
-%      'BE'  : Backward Euler        (order 1)
-%      'IM2' : Implicit Midpoint     (order 2)
-%      'RK3' : Kutta third-order RK  (order 3)
-%      'RK4' : Classical RK4         (order 4)
-%
-%  Temporal error:
-%
-%      E_N^(k)
-%      = max_{0<=n<=N} ||U_n^(k)-U_h(T_n)||_h
-%
-%  Plot:
-%
-%      horizontal axis : log_2(N)
-%      vertical axis   : log_10(error)
-%
-%% ============================================================
+
 
 
 %% ============================================================
