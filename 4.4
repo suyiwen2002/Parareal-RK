@@ -1,0 +1,674 @@
+function ReactionDiffusion3D()
+
+
+%% ======================= USER CONFIGURATION ============================
+L = 1.0;
+Tfinal = 5.0;
+D = 1e-2;
+lambda = 1.0;
+N = 64;
+Klist = [1 2 3];
+nRepeats = 5;
+
+Pscaling = [6 8 16 32 64];
+Mstudy = [50 100 150];
+Jstudy = [40 60 80 120 160];
+
+runValidation = true;
+plotResults = true;
+saveResults = true;
+outputPrefix = 'ReactionDiffusion3D_Unified';
+% ========================================================================
+
+assert(N==64 && isequal(Klist,[1 2 3]), ...
+    'This unified comparison is configured for N=64 and K=1:3.');
+assert(nRepeats>=2,'At least 2 timing repeats required for sample SD.');
+assert(all(Pscaling>0 & Pscaling<=N & mod(Pscaling,1)==0), ...
+    'All P must be integers in [1,N].');
+assert(all(Mstudy>=1 & mod(Mstudy,1)==0));
+assert(all(Jstudy>=4 & mod(Jstudy,1)==0));
+
+% Build the three study lists, then DEDUPLICATE overlapping configurations.
+% Sort by J then P, keeping the same pool for the three M values at P=32.
+studyA = [40*ones(numel(Pscaling),1), ...
+          100*ones(numel(Pscaling),1), Pscaling(:)];
+studyB = [40*ones(numel(Mstudy),1), Mstudy(:), ...
+          32*ones(numel(Mstudy),1)];
+studyC = [Jstudy(:), 100*ones(numel(Jstudy),1), ...
+          32*ones(numel(Jstudy),1)];
+requestedConfigs = [studyA;studyB;studyC];
+configs = unique(requestedConfigs,'rows','stable');
+configs = sortrows(configs,[1 3 2]);
+uniqueJs = unique(configs(:,1),'stable');
+
+fprintf('\n============================================================\n');
+fprintf('3D REACTION-DIFFUSION: THREE TABLES / SHARED SERIAL BASELINE\n');
+fprintf('N=%d, Klist=%s, repeats=%d (mean +/- sample SD)\n', ...
+    N,mat2str(Klist),nRepeats);
+fprintf('P scaling: %s; M study: %s; J study: %s\n', ...
+    mat2str(Pscaling),mat2str(Mstudy),mat2str(Jstudy));
+fprintf('Unique (J,M,P) configurations: %d (requested rows before dedup: %d)\n', ...
+    size(configs,1),size(requestedConfigs,1));
+fprintf('The same (J=40,M=100,P=32) timings are reused in ALL three tables.\n');
+fprintf('============================================================\n');
+
+% One-thread client to make all serial baselines directly comparable.
+oldThreads = maxNumCompThreads;
+maxNumCompThreads(1);
+restoreThreads = onCleanup(@() maxNumCompThreads(oldThreads)); %#ok<NASGU>
+
+% Eliminate any residual parpool during the serial baseline measurement.
+closePoolIfOpen();
+poolCleanup = onCleanup(@closePoolIfOpen); %#ok<NASGU>
+
+%% =============================== STORAGE ===============================
+AllResults = table();
+SerialBaselineTable = table();
+CoarseBaselineTable = table();
+RawTimingTable = table();
+IterationPhaseTable = table();
+
+% Cache the 7 independent serial baselines by (J,M) in a unified table.
+% Execution order: all serial benchmarks at one J, THEN its parallel tests.
+for ij = 1:numel(uniqueJs)
+    J = uniqueJs(ij);
+    thisJConfigs = configs(configs(:,1)==J,:);
+    thisMs = unique(thisJConfigs(:,2),'stable');
+
+    % Close any pool BEFORE the serial timing for this J.
+    closePoolIfOpen();
+
+    m = J-1;
+    ndof = m^3;
+    h = L/J;
+    DeltaT = Tfinal/N;
+
+    x = (1:m)'*h;
+    [X,Y,Z] = ndgrid(x,x,x);
+    u0 = sin(pi*X/L).*sin(pi*Y/L).*sin(pi*Z/L);
+    u0 = u0(:);
+    clear X Y Z;
+
+    % Continuous PDE exact and exact SEMIDISCRETE eigenmode solution.
+    muContinuous = lambda-3*D*(pi/L)^2;
+    muSemiDiscrete = lambda - (12*D/h^2)*sin(pi/(2*J))^2;
+    uExactContinuous = exp(muContinuous*Tfinal)*u0;
+    uExactSemi = exp(muSemiDiscrete*Tfinal)*u0;
+
+    % DST backward Euler coarse solver (only built once for each J).
+    tSetup=tic;
+    Gsolver = buildDSTSolver3D(J,L,D,lambda,DeltaT);
+    DSTSetup_s = toc(tSetup);
+
+    fprintf('\n============================================================\n');
+    fprintf('SPATIAL GRID J=%d, ndof=%d, M values=%s\n', ...
+        J,ndof,mat2str(thisMs(:).'));
+    fprintf('DST setup=%.6fs (excluded)\n',DSTSetup_s);
+    fprintf('============================================================\n');
+
+    if runValidation
+        validateOperators3D(J,L,D,lambda,DeltaT,Gsolver);
+    end
+
+    %% ==================== SHARED COARSE SWEEP ==========================
+    % This cost is used only by the optional no-overhead prediction model.
+    coarseWarm = sequentialCoarseDST3D(u0,Gsolver,N); %#ok<NASGU>
+    tCoarse = zeros(nRepeats,1);
+    for rep=1:nRepeats
+        t0=tic;
+        coarseEnd = sequentialCoarseDST3D(u0,Gsolver,N); %#ok<NASGU>
+        tCoarse(rep)=toc(t0);
+    end
+    GsweepMean=mean(tCoarse);
+    GsweepSD=std(tCoarse);
+
+    coarseRec=table(J,N,ndof,DSTSetup_s,GsweepMean,GsweepSD, ...
+       'VariableNames',{'J','N','NDOF','DSTSetup_s', ...
+                         'CoarseSweepMean_s','CoarseSweepSD_s'});
+    CoarseBaselineTable=appendTable(CoarseBaselineTable,coarseRec);
+
+    %% ==================== SERIAL RK4, ONCE PER (J,M) ==================
+    nMs=numel(thisMs);
+    serialSolutions=cell(nMs,1);
+    serialMeans=nan(nMs,1);
+    serialSDs=nan(nMs,1);
+    serialErrSemi=nan(nMs,1);
+    serialErrContinuous=nan(nMs,1);
+
+    for iM=1:nMs
+        M=thisMs(iM);
+        dt=DeltaT/M;
+        spectralBound=max(0,12*D/h^2*cos(pi/(2*J))^2-lambda);
+        stabilityNumber=dt*spectralBound;
+        if stabilityNumber>=2.785
+            error('RK4 stability check failed for J=%d, M=%d (%.4g).', ...
+                J,M,stabilityNumber);
+        end
+
+        fprintf('\nSERIAL RK4 BASELINE: J=%d,M=%d,steps=%d\n',J,M,N*M);
+        warm = fineRK4Linear3DMatrixFree(u0,J,L,D,lambda,dt,1); %#ok<NASGU>
+        serialTimes=zeros(nRepeats,1);
+
+        for rep=1:nRepeats
+            ts=tic;
+            uSerial=fineRK4Linear3DMatrixFree( ...
+                u0,J,L,D,lambda,dt,N*M);
+            serialTimes(rep)=toc(ts);
+            fprintf('  serial rep %d/%d: %.6fs\n',rep,nRepeats,serialTimes(rep));
+
+            rawRec=table(J,N,M,NaN,0,rep,true,serialTimes(rep), ...
+                NaN,NaN,NaN,NaN,NaN, ...
+                'VariableNames',{'J','N','M','P','K','Repeat', ...
+                'IsSerial','Total_s','InitialCoarse_s','FinePhase_s', ...
+                'Correction_s','Other_s','ParaSerialRelErr'});
+            RawTimingTable=appendTable(RawTimingTable,rawRec);
+        end
+
+        serialSolutions{iM}=uSerial;
+        serialMeans(iM)=mean(serialTimes);
+        serialSDs(iM)=std(serialTimes);
+        serialErrSemi(iM)=relativeError(uSerial,uExactSemi);
+        serialErrContinuous(iM)=relativeError(uSerial,uExactContinuous);
+
+        baselineRec=table(J,N,M,ndof,N*M,dt,stabilityNumber, ...
+            serialMeans(iM),serialSDs(iM), ...
+            serialErrSemi(iM),serialErrContinuous(iM), ...
+            'VariableNames',{'J','N','M','NDOF','RK4Steps','dt', ...
+            'StabilityNumber','SerialMean_s','SerialSD_s', ...
+            'SerialSemiExactRelErr','SerialContinuousExactRelErr'});
+        SerialBaselineTable=appendTable(SerialBaselineTable,baselineRec);
+        fprintf('  SERIAL mean +/- SD: %.6f +/- %.6f s\n', ...
+            serialMeans(iM),serialSDs(iM));
+    end
+
+    %% ====================== PARAREAL (P,M,K) ==========================
+    % Each unique (J,M,P) configuration is timed once as 5 repeats for
+    % each complete K=1,2,3 run. Results are then reused across tables.
+    for icfg=1:size(thisJConfigs,1)
+        M=thisJConfigs(icfg,2);
+        P=thisJConfigs(icfg,3);
+        iM=find(thisMs==M,1);
+        dt=DeltaT/M;
+        uSerial=serialSolutions{iM};
+        Tserial=serialMeans(iM);
+        TserialSD=serialSDs(iM);
+
+        pool=gcp('nocreate');
+        if isempty(pool) || pool.NumWorkers~=P
+            if ~isempty(pool), delete(pool); end
+            fprintf('\nStarting parpool P=%d (startup EXCLUDED)...\n',P);
+            try
+                pool=parpool('local',P);
+            catch ME
+                error('Could not start P=%d workers: %s',P,ME.message);
+            end
+        end
+        assert(pool.NumWorkers==P, ...
+            'Parallel pool mismatch: requested P=%d.',P);
+
+        fprintf('\n------------------------------------------------------------\n');
+        fprintf('PARAREAL J=%d M=%d P=%d / N=%d, K=[1,2,3]\n',J,M,P,N);
+        fprintf('Reuse shared SERIAL = %.6f +/- %.6f s\n',Tserial,TserialSD);
+        fprintf('------------------------------------------------------------\n');
+
+        % Unmeasured warmups. Nwarm=2 keeps J=160 warmup memory bounded,
+        % while keeping G and F on exactly the same physical coarse slice.
+        warmTasks=zeros(P,1);
+        parfor iw=1:P
+            w=fineRK4Linear3DMatrixFree(u0,J,L,D,lambda,dt,1);
+            warmTasks(iw)=w(1);
+        end
+        assert(all(isfinite(warmTasks)),'Worker fine RK4 warmup failed.');
+        wG=coarseBackwardEulerLinear3D(u0,Gsolver); %#ok<NASGU>
+        Nwarm=min(2,N);
+        [~,warmStat]=runPararealLinear3D_DST_MemoryEfficient( ...
+            u0,J,L,D,lambda,Gsolver,Nwarm,M,dt,1); %#ok<NASGU>
+
+        for ik=1:numel(Klist)
+            K=Klist(ik);
+
+            Tpara=zeros(nRepeats,1);
+            Tinit=zeros(nRepeats,1);
+            Tfine=zeros(nRepeats,1);
+            Tcorr=zeros(nRepeats,1);
+            Tother=zeros(nRepeats,1);
+            EparaSerial=zeros(nRepeats,1);
+            EparaSemi=zeros(nRepeats,1);
+            EparaContinuous=zeros(nRepeats,1);
+
+            for rep=1:nRepeats
+                tt=tic;
+                [uPara,stage]=runPararealLinear3D_DST_MemoryEfficient( ...
+                    u0,J,L,D,lambda,Gsolver,N,M,dt,K);
+                Tpara(rep)=toc(tt);
+
+                Tinit(rep)=stage.initialCoarse_s;
+                Tfine(rep)=sum(stage.fine_s);
+                Tcorr(rep)=sum(stage.correction_s);
+                Tother(rep)=Tpara(rep)-Tinit(rep)-Tfine(rep)-Tcorr(rep);
+
+                EparaSerial(rep)=relativeError(uPara,uSerial);
+                EparaSemi(rep)=relativeError(uPara,uExactSemi);
+                EparaContinuous(rep)=relativeError(uPara,uExactContinuous);
+
+                fprintf(['  J=%3d M=%3d P=%2d K=%d rep=%d/%d: ', ...
+                    'T=%.6fs, Epara-serial=%.4e\n'], ...
+                    J,M,P,K,rep,nRepeats,Tpara(rep),EparaSerial(rep));
+
+                rawRec=table(J,N,M,P,K,rep,false,Tpara(rep), ...
+                    Tinit(rep),Tfine(rep),Tcorr(rep),Tother(rep), ...
+                    EparaSerial(rep), ...
+                    'VariableNames',{'J','N','M','P','K','Repeat', ...
+                    'IsSerial','Total_s','InitialCoarse_s','FinePhase_s', ...
+                    'Correction_s','Other_s','ParaSerialRelErr'});
+                RawTimingTable=appendTable(RawTimingTable,rawRec);
+
+                for kk=1:K
+                    phaseRec=table(J,N,M,P,K,rep,kk, ...
+                        stage.fine_s(kk),stage.correction_s(kk), ...
+                        stage.fine_s(kk)+stage.correction_s(kk), ...
+                        'VariableNames',{'J','N','M','P','TotalK', ...
+                        'Repeat','Iteration','FineWall_s','CorrectionWall_s', ...
+                        'IncrementalIteration_s'});
+                    IterationPhaseTable=appendTable(IterationPhaseTable,phaseRec);
+                end
+            end
+
+            Tpred=(K+1)*GsweepMean + K*ceil(N/P)*(Tserial/N);
+            TparaMean=mean(Tpara);
+            TparaSD=std(Tpara);
+            Sreal=Tserial/TparaMean;
+            Ereal=100*Sreal/P;
+            Spred=Tserial/Tpred;
+            Epred=100*Spred/P;
+
+            summaryRec=table(J,N,M,P,K,ndof,Tserial,TserialSD, ...
+                TparaMean,TparaSD,Tpred,Sreal,Ereal,Spred,Epred, ...
+                100*(1-TparaMean/Tserial), ...
+                mean(EparaSerial),max(EparaSerial), ...
+                mean(EparaSemi),mean(EparaContinuous), ...
+                serialErrSemi(iM),serialErrContinuous(iM), ...
+                mean(Tinit),std(Tinit),mean(Tfine),std(Tfine), ...
+                mean(Tcorr),std(Tcorr),mean(Tother),std(Tother), ...
+                GsweepMean,GsweepSD,DSTSetup_s, ...
+                'VariableNames',{ ...
+                'J','N','M','P','K','NDOF','SerialMean_s','SerialSD_s', ...
+                'PararealMean_s','PararealSD_s','PredictedTime_s', ...
+                'Speedup','Efficiency_pct','PredictedSpeedup','PredictedEfficiency_pct', ...
+                'TimeReduction_pct', ...
+                'ParaSerialRelErrMean','ParaSerialRelErrMax', ...
+                'ParaSemiExactRelErr','ParaContinuousExactRelErr', ...
+                'SerialSemiExactRelErr','SerialContinuousExactRelErr', ...
+                'InitCoarseMean_s','InitCoarseSD_s', ...
+                'FinePhaseMean_s','FinePhaseSD_s', ...
+                'CorrectionMean_s','CorrectionSD_s', ...
+                'OtherMean_s','OtherSD_s', ...
+                'CoarseSweepMean_s','CoarseSweepSD_s','DSTSetup_s'});
+            AllResults=appendTable(AllResults,summaryRec);
+
+            fprintf(['  ==> K=%d: Para=%.6f +/- %.6f s, ', ...
+                'speedup=%.4f, efficiency=%.2f%%, ', ...
+                'prediction=%.6fs, error=%.4e\n'], ...
+                K,TparaMean,TparaSD,Sreal,Ereal,Tpred,max(EparaSerial));
+        end
+
+        % Persist the complete numerical data after each finished (J,M,P).
+        if saveResults
+            save([outputPrefix '_Checkpoint.mat'], ...
+                'AllResults','SerialBaselineTable','CoarseBaselineTable', ...
+                'RawTimingTable','IterationPhaseTable', ...
+                'configs','Klist','nRepeats','Tfinal','L','D','lambda','N');
+        end
+    end
+
+    % J-specific state vectors (especially J=160) are released on loop exit
+    % / next assignment; no full 3-D sparse matrix was constructed for J>40.
+end
+
+closePoolIfOpen();
+
+%% ====================== PER-ITERATION MEAN AND SD ======================
+% This gives the additional increment of the k-th Parareal correction
+% within each full-K run, in addition to the independently measured FULL
+% K=1,2,3 wall-clock runtimes in AllResults.
+IterationPhaseSummary=table();
+keys=unique(IterationPhaseTable(:,{'J','M','P','TotalK','Iteration'}),'rows');
+for ikey=1:height(keys)
+    mask=IterationPhaseTable.J==keys.J(ikey) & ...
+         IterationPhaseTable.M==keys.M(ikey) & ...
+         IterationPhaseTable.P==keys.P(ikey) & ...
+         IterationPhaseTable.TotalK==keys.TotalK(ikey) & ...
+         IterationPhaseTable.Iteration==keys.Iteration(ikey);
+    R=IterationPhaseTable(mask,:);
+    r=table(keys.J(ikey),N,keys.M(ikey),keys.P(ikey), ...
+        keys.TotalK(ikey),keys.Iteration(ikey), ...
+        mean(R.FineWall_s),std(R.FineWall_s), ...
+        mean(R.CorrectionWall_s),std(R.CorrectionWall_s), ...
+        mean(R.IncrementalIteration_s),std(R.IncrementalIteration_s), ...
+        'VariableNames',{'J','N','M','P','TotalK','Iteration', ...
+        'FineMean_s','FineSD_s','CorrectionMean_s','CorrectionSD_s', ...
+        'IncrementalIterationMean_s','IncrementalIterationSD_s'});
+    IterationPhaseSummary=appendTable(IterationPhaseSummary,r);
+end
+
+%% ========================== THREE PAPER TABLES ==========================
+% These are three FILTERS of ONE master table, so shared configurations
+% retain exactly identical serial time, Parareal time, speedup and error.
+PscalingTable=AllResults(AllResults.J==40 & AllResults.M==100 & ...
+    ismember(AllResults.P,Pscaling),:);
+PscalingTable=sortrows(PscalingTable,{'P','K'});
+
+MstudyTable=AllResults(AllResults.J==40 & AllResults.P==32 & ...
+    ismember(AllResults.M,Mstudy),:);
+MstudyTable=sortrows(MstudyTable,{'M','K'});
+
+JstudyTable=AllResults(AllResults.M==100 & AllResults.P==32 & ...
+    ismember(AllResults.J,Jstudy),:);
+JstudyTable=sortrows(JstudyTable,{'J','K'});
+
+assert(height(PscalingTable)==numel(Pscaling)*numel(Klist), ...
+    'P scaling table must contain 5x3 rows.');
+assert(height(MstudyTable)==numel(Mstudy)*numel(Klist), ...
+    'M study table must contain 3x3 rows.');
+assert(height(JstudyTable)==numel(Jstudy)*numel(Klist), ...
+    'J study table must contain 5x3 rows.');
+
+% Verify the overlapping J=40,M=100,P=32 results are literally the same.
+for K=Klist
+    pRow=PscalingTable(PscalingTable.P==32 & PscalingTable.K==K,:);
+    mRow=MstudyTable(MstudyTable.M==100 & MstudyTable.K==K,:);
+    jRow=JstudyTable(JstudyTable.J==40 & JstudyTable.K==K,:);
+    assert(height(pRow)==1 && height(mRow)==1 && height(jRow)==1);
+    assert(isequaln(pRow,mRow) && isequaln(pRow,jRow), ...
+        'The three tables disagree for the common configuration.');
+end
+
+paperCols={'J','N','M','P','K','SerialMean_s','SerialSD_s', ...
+    'PararealMean_s','PararealSD_s', ...
+    'Speedup','Efficiency_pct','ParaSerialRelErrMean', ...
+    'ParaContinuousExactRelErr'};
+fprintf('\n============================================================\n');
+fprintf('TABLE 1: P SCALING, J=40,N=64,M=100 (15 rows)\n');
+fprintf('============================================================\n');
+disp(PscalingTable(:,paperCols));
+
+fprintf('\n============================================================\n');
+fprintf('TABLE 2: M STUDY, J=40,N=64,P=32 (9 rows)\n');
+fprintf('============================================================\n');
+disp(MstudyTable(:,paperCols));
+
+fprintf('\n============================================================\n');
+fprintf('TABLE 3: J STUDY, N=64,M=100,P=32 (15 rows)\n');
+fprintf('============================================================\n');
+disp(JstudyTable(:,paperCols));
+
+if saveResults
+    writetable(PscalingTable(:,paperCols),[outputPrefix '_Pscaling.csv']);
+    writetable(MstudyTable(:,paperCols),[outputPrefix '_Mstudy.csv']);
+    writetable(JstudyTable(:,paperCols),[outputPrefix '_Jstudy.csv']);
+    writetable(AllResults,[outputPrefix '_AllConfigurations.csv']);
+    writetable(SerialBaselineTable,[outputPrefix '_SerialBaselines.csv']);
+    writetable(CoarseBaselineTable,[outputPrefix '_CoarseBaselines.csv']);
+    writetable(RawTimingTable,[outputPrefix '_RawTimings.csv']);
+    writetable(IterationPhaseTable,[outputPrefix '_IterationPhases.csv']);
+    writetable(IterationPhaseSummary,[outputPrefix '_IterationPhaseSummary.csv']);
+    save([outputPrefix '_Results.mat'], ...
+        'PscalingTable','MstudyTable','JstudyTable', ...
+        'AllResults','SerialBaselineTable','CoarseBaselineTable', ...
+        'RawTimingTable','IterationPhaseTable','IterationPhaseSummary', ...
+        'requestedConfigs','configs','N','Klist','nRepeats', ...
+        'Jstudy','Mstudy','Pscaling','Tfinal','D','lambda','L');
+end
+
+if plotResults
+    plot3DStudy(PscalingTable,'P','Number of workers P', ...
+        'P scaling: J=40, N=64, M=100', ...
+        [outputPrefix '_Pscaling_Speedup.png']);
+    plot3DStudy(MstudyTable,'M','RK4 steps per slice M', ...
+        'M study: J=40, N=64, P=32', ...
+        [outputPrefix '_Mstudy_Speedup.png']);
+    plot3DStudy(JstudyTable,'J','Spatial subdivisions J', ...
+        'J study: N=64, M=100, P=32', ...
+        [outputPrefix '_Jstudy_Speedup.png']);
+end
+
+fprintf('\n============================================================\n');
+fprintf('SUCCESS: Unified 3D tables, 5 repetitions, sample Mean +/- SD.\n');
+fprintf('Unique serial RK4 baselines per (J,M): %d\n', ...
+    height(SerialBaselineTable));
+fprintf('Unique (J,M,P,K) results: %d\n',height(AllResults));
+fprintf('Table 1 rows: %d; Table 2 rows: %d; Table 3 rows: %d.\n', ...
+    height(PscalingTable),height(MstudyTable),height(JstudyTable));
+fprintf('All overlapping configurations use EXACTLY the same results.\n');
+fprintf('============================================================\n');
+
+end
+
+%% ============================= LOCAL HELPERS ============================
+function Out=appendTable(Out,newRow)
+    if isempty(Out)
+        Out=newRow;
+    else
+        Out=[Out;newRow];
+    end
+end
+
+function A=buildSparseLh3D(J,L,D,lambda)
+% ORIGINAL 3D kron operator, used only for validation at J=40.
+    m=J-1; h=L/J;
+    e=ones(m,1);
+    T1=spdiags([e -2*e e],[-1 0 1],m,m);
+    I1=speye(m);
+    Ah=(D/h^2)*(kron(I1,kron(I1,T1)) ...
+        +kron(I1,kron(T1,I1))+kron(T1,kron(I1,I1)));
+    A=Ah+lambda*speye(m^3);
+end
+
+function y=applyLh3DMatrixFree(v,J,L,D,lambda)
+% Exactly the original 7-point 3D centered difference with homogeneous
+% Dirichlet boundary (no periodic wrapping, no physical boundary nodes).
+    m=J-1;
+    dx=L/J;
+    a=D/dx^2;
+    U=reshape(v,[m,m,m]);
+    V=(lambda-6*a)*U;
+    V(2:m,:,:)   = V(2:m,:,:)   + a*U(1:m-1,:,:);
+    V(1:m-1,:,:) = V(1:m-1,:,:) + a*U(2:m,:,:);
+    V(:,2:m,:)   = V(:,2:m,:)   + a*U(:,1:m-1,:);
+    V(:,1:m-1,:) = V(:,1:m-1,:) + a*U(:,2:m,:);
+    V(:,:,2:m)   = V(:,:,2:m)   + a*U(:,:,1:m-1);
+    V(:,:,1:m-1) = V(:,:,1:m-1) + a*U(:,:,2:m);
+    y=V(:);
+end
+
+function y=fineRK4Linear3DMatrixFree(v,J,L,D,lambda,dt,nSteps)
+% Classical RK4 with the original SEMIDISCRETE Lh, applied matrix-free.
+    y=v(:);
+    for step=1:nSteps
+        k1=applyLh3DMatrixFree(y,J,L,D,lambda);
+        k2=applyLh3DMatrixFree(y+0.5*dt*k1,J,L,D,lambda);
+        k3=applyLh3DMatrixFree(y+0.5*dt*k2,J,L,D,lambda);
+        k4=applyLh3DMatrixFree(y+dt*k3,J,L,D,lambda);
+        y=y+(dt/6)*(k1+2*k2+2*k3+k4);
+    end
+    if any(~isfinite(y))
+        error('Matrix-free RK4 produced NaN or Inf.');
+    end
+end
+
+function solver=buildDSTSolver3D(J,L,D,lambda,DeltaT)
+% Original DST-I BE implementation from the provided program.
+    m=J-1;
+    h=L/J;
+    p=(1:m)';
+    alpha=(4*D/h^2)*sin(pi*p/(2*J)).^2;
+    denom=1-DeltaT*lambda + DeltaT*( ...
+        reshape(alpha,[m,1,1])+reshape(alpha,[1,m,1]) ...
+        +reshape(alpha,[1,1,m]));
+    if any(denom(:)<=0)
+        error('BE matrix is not SPD; DST denominator must be positive.');
+    end
+    solver.m=m;
+    solver.denom=denom;
+    solver.inverseScale=(2/J)^3;
+end
+
+function y=coarseBackwardEulerLinear3D(v,solver)
+% Original DST-I factorization of backward Euler inversion.
+    U=reshape(v,[solver.m,solver.m,solver.m]);
+    U=dst1fft3D(U,1);
+    U=dst1fft3D(U,2);
+    U=dst1fft3D(U,3);
+    U=U./solver.denom;
+    U=dst1fft3D(U,1);
+    U=dst1fft3D(U,2);
+    U=dst1fft3D(U,3);
+    y=U(:)*solver.inverseScale;
+end
+
+function Y=dst1fft3D(X,dim)
+% Unscaled first-kind discrete sine transform (DST-I), via FFT.
+    nd=ndims(X);
+    order=[dim,1:dim-1,dim+1:nd];
+    A=permute(X,order);
+    sz=size(A);
+    m=sz(1);
+    A=reshape(A,m,[]);
+    Z=[zeros(1,size(A,2)); A; ...
+       zeros(1,size(A,2)); -flipud(A)];
+    F=fft(Z,[],1);
+    B=-imag(F(2:m+1,:))/2;
+    Y=ipermute(reshape(B,sz),order);
+end
+
+function y=sequentialCoarseDST3D(u0,solver,N)
+    y=u0(:);
+    for n=1:N
+        y=coarseBackwardEulerLinear3D(y,solver);
+    end
+end
+
+function [uFinal,stage]=runPararealLinear3D_DST_MemoryEfficient( ...
+    u0,J,L,D,lambda,Gsolver,N,M,dt,K)
+% Equivalent to the ORIGINAL cached-G Parareal implementation, but performs
+% correction IN PLACE to avoid TWO extra (ndof-by-N) arrays at J=160.
+%
+% At the beginning of iteration k:
+%     U(:,n) holds old Parareal node U_n^k;
+%     Gold(:,n) holds G(U_n^k).
+% AFTER all fine tasks F(U_n^k) finish:
+%     scan n in ascending order and overwrite U(:,n+1) with U_n^{k+1};
+%     overwrite Gold(:,n) with G(U_n^{k+1}).
+% No old U(:,n+1) value is required by the sequential correction, because
+% all fine propagation has already completed and old G is cached.
+    ndof=numel(u0);
+    U=zeros(ndof,N+1);
+    Gold=zeros(ndof,N);
+    U(:,1)=u0(:);
+
+    stage.initialCoarse_s=0;
+    stage.fine_s=zeros(K,1);
+    stage.correction_s=zeros(K,1);
+
+    tInitial=tic;
+    for n=1:N
+        g=coarseBackwardEulerLinear3D(U(:,n),Gsolver);
+        Gold(:,n)=g;
+        U(:,n+1)=g;
+    end
+    stage.initialCoarse_s=toc(tInitial);
+
+    for k=1:K
+        FineOld=zeros(ndof,N);
+        tFine=tic;
+        parfor n=1:N
+            FineOld(:,n)=fineRK4Linear3DMatrixFree( ...
+                U(:,n),J,L,D,lambda,dt,M);
+        end
+        stage.fine_s(k)=toc(tFine);
+
+        tCorr=tic;
+        for n=1:N
+            gNew=coarseBackwardEulerLinear3D(U(:,n),Gsolver);
+            U(:,n+1)=gNew+FineOld(:,n)-Gold(:,n);
+            Gold(:,n)=gNew;
+        end
+        stage.correction_s(k)=toc(tCorr);
+    end
+
+    uFinal=U(:,end);
+    if any(~isfinite(uFinal))
+        error('Nonfinite 3D Parareal final result.');
+    end
+end
+
+function E=relativeError(u,v)
+    E=norm(u(:)-v(:))/max(norm(v(:)),eps);
+end
+
+function validateOperators3D(J,L,D,lambda,DeltaT,Gsolver)
+% Check DST BE residual for every J (without allocating large kron(A)).
+% For J=40 also compare matrix-free apply to the ORIGINAL kron operator
+% and compare DST BE to original direct sparse matrix solve.
+    ndof=(J-1)^3;
+    rng(123,'twister');
+    v=randn(ndof,1);
+    y=coarseBackwardEulerLinear3D(v,Gsolver);
+    residual=y-DeltaT*applyLh3DMatrixFree(y,J,L,D,lambda)-v;
+    res=norm(residual)/norm(v);
+    fprintf('  J=%d: DST BE residual relative norm: %.3e\n',J,res);
+    assert(res<1e-10,'DST coarse solver residual check FAILED.');
+
+    if J==40
+        A=buildSparseLh3D(J,L,D,lambda);
+        ySparse=A*v;
+        yMatrixFree=applyLh3DMatrixFree(v,J,L,D,lambda);
+        opDiff=norm(ySparse-yMatrixFree)/max(norm(ySparse),eps);
+        B=speye(ndof)-DeltaT*A;
+        ch=decomposition(B,'chol');
+        yDirect=ch\v;
+        dstDiff=norm(y-yDirect)/max(norm(yDirect),eps);
+        fprintf('  J=40: matrix-free vs sparse Lh rel difference = %.3e\n',opDiff);
+        fprintf('  J=40: DST BE vs sparse Cholesky rel difference = %.3e\n',dstDiff);
+        assert(opDiff<1e-12 && dstDiff<1e-10, ...
+            'Matrix-free operator / DST solver does not match original.');
+    end
+end
+
+function closePoolIfOpen()
+    try
+        pool=gcp('nocreate');
+        if ~isempty(pool)
+            delete(pool);
+        end
+    catch
+        % Do not mask the numerical error, if there is one.
+    end
+end
+
+function plot3DStudy(T,xName,xLabel,titleText,outFile)
+    try
+        f=figure('Visible','off','Color','w');
+        ax=axes('Parent',f);
+        hold(ax,'on');
+        allK=unique(T.K,'stable');
+        handles=gobjects(numel(allK),1);
+        labels=cell(numel(allK),1);
+        for i=1:numel(allK)
+            S=T(T.K==allK(i),:);
+            S=sortrows(S,xName);
+            handles(i)=plot(ax,S.(xName),S.Speedup,'-o', ...
+                'LineWidth',1.5,'MarkerSize',5);
+            labels{i}=sprintf('K=%d',allK(i));
+        end
+        xlabel(ax,xLabel);
+        ylabel(ax,'Measured speedup vs serial RK4');
+        title(ax,titleText);
+        legend(ax,handles,labels,'Location','best');
+        grid(ax,'on');
+        saveas(f,outFile);
+        close(f);
+    catch ME
+        warning('Could not save %s: %s',outFile,ME.message);
+    end
+end
