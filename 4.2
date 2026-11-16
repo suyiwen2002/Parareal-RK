@@ -1,39 +1,4 @@
-%% Parareal_RK_AllenCahn_General.m
-%
-% Allen-Cahn semilinear reaction-diffusion equation
-%
-%   u_t = epsilon^2*u_xx + u - u^3,
-%         0 < x < 1, 0 < t <= T
-%
-%   u(0,t) = u(1,t) = 0
-%
-%   u(x,0) = 0.8*sin(2*pi*x)
-%
-% Spatial discretization:
-%   Second-order central finite difference
-%
-% Available time integrators:
-%
-%   'BE'  : Backward Euler,             order 1
-%   'IM2' : Implicit Midpoint,          order 2
-%   'RK3' : Classical third-order RK,   order 3
-%   'RK4' : Classical fourth-order RK,  order 4
-%
-% Both coarse and fine propagators can be selected independently.
-%
-% For fixed Mfine and p <= q, the theoretical estimate is
-%
-%   E_k = O(DeltaT^(min{p(k+1),q})).
-%
-% Reference solution:
-%   High-accuracy serial classical RK4 solution on the SAME spatial
-%   semi-discrete system.
-%
-% No figures are generated.
-%
-% MATLAB R2016b or later is recommended.
-%
-% -------------------------------------------------------------------------
+
 
  clear;
  clc;
