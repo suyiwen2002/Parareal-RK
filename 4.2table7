@@ -1,0 +1,763 @@
+%% AllenCahn_BE_RK4_vs_BE_IM2_AccuracyMatched.m
+% Third-round Reviewer Comment 3: explicit vs implicit fine propagators.
+%
+% Problem (same as Section 4.2 of the manuscript):
+%   u_t = epsilon^2 u_xx + u - u^3,  x in (0,1), T=1,
+%   u(0,t)=u(1,t)=0, u(x,0)=0.8*sin(2*pi*x).
+%
+% Both Parareal configurations use the SAME backward Euler (BE) coarse
+% propagator; the fine propagator is either RK4 or implicit midpoint (IM2).
+%
+% TIMING RULES, matching the paper:
+%   - Run each timed configuration five times.
+%   - Report MEAN +/- SAMPLE STANDARD DEVIATION, not median.
+%   - T_ser is the serial execution of the EXACT SAME fine method and M
+%     as the Parareal fine propagator for that configuration.
+%   - T_par includes initial BE sweep, all fine phases, all BE corrections.
+%   - Speedup = mean(T_ser)/mean(T_par); efficiency = speedup/P.
+%   - Exclude parallel-pool startup/shutdown, explicit warm-up, spatial
+%     matrix setup and independent reference-solution calculation.
+%   - REQUIRED Newton sparse factorizations inside BE/IM2 propagation ARE
+%     part of the measured solve cost: they cannot be excluded without
+%     understating the real cost of the implicit method.
+%
+% ACCURACY:
+%   - Every method compares with one common, more accurate serial RK4
+%     reference computed OUTSIDE timing, using Mref fine steps/interval.
+%   - "ErrorToOwnFine" is also reported for compatibility with Table 8.
+%   - Use "ErrorToReference" (not ErrorToOwnFine) for fairness when
+%     matching accuracy across RK4 and IM2.
+%
+% MATLAB R2018b compatible: uses print, not exportgraphics.
+% Requires Parallel Computing Toolbox. Not executed in this environment.
+
+clearvars;
+clc;
+close all;
+
+%% -------------------- USER PARAMETERS -------------------------------
+L = 1.0;
+T = 1.0;
+epsilon = 0.1;
+diffusionCoeff = epsilon^2;
+
+J = 1600;        % spatial subintervals, exactly as in Table 8
+N = 60;          % coarse time intervals
+workerListRequested = 6;   % same P=6 as Table 8; can set [1 2 3 4 5 6]
+
+% To reproduce the K=1,2,3 rows of Table 8, keep [1 2 3].
+% For a faster pilot run, temporarily set KparList=2.
+KparList = [1 2 3];
+
+nRepeats = 5;                % mean +/- sample SD, as specified in article
+newtonTol = 1.0e-12;
+newtonMaxit = 40;
+
+% Candidate M values. Select configurations of COMPARABLE accuracy after
+% inspecting "PararealErrorToRef"; these are not assumed accuracy-matched.
+fineConfigs = struct( ...
+    'method', {'RK4','RK4','IM2','IM2','IM2'}, ...
+    'M',      { 800, 1600, 100, 200, 400 });
+
+% Independent, common high-accuracy reference, NOT a speedup baseline.
+% Optional independent convergence check: raise Mref to 6400 and compare.
+Mref = 3200;
+
+saveResults = true;
+outputFolder = 'AllenCahn_RK4_IM2_Comparison';
+
+%% -------------------- RESOURCE CHECK -------------------------------
+if ~license('test','Distrib_Computing_Toolbox')
+    error('Parallel Computing Toolbox is required.');
+end
+localCluster = parcluster('local');
+maxWorkers = localCluster.NumWorkers;
+workerList = workerListRequested( ...
+    workerListRequested <= maxWorkers & workerListRequested <= N);
+if isempty(workerList)
+    error('Requested worker counts unavailable. Max workers = %d.',maxWorkers);
+end
+if nRepeats < 2
+    error('At least two timing repetitions are needed for sample SD.');
+end
+if saveResults && ~exist(outputFolder,'dir')
+    mkdir(outputFolder);
+end
+
+pool = gcp('nocreate');
+if ~isempty(pool)
+    delete(pool);
+end
+
+originalClientThreads = maxNumCompThreads;
+maxNumCompThreads(1);
+
+try
+    %% -------------------- SETUP (not timed) -------------------------
+    h = L/J;
+    x = linspace(0,L,J+1).';
+    u0 = allenCahnInitialCondition(x(2:end-1));
+    A = buildDiffusionMatrix(J,L,diffusionCoeff);
+
+    reaction = @(u) u - u.*u.*u;
+    reactionPrime = @(u) 1.0 - 3.0*(u.*u);
+
+    DeltaT = T/N;
+    ndof = J-1;
+    maxNegEig = 4.0*diffusionCoeff/h^2*cos(pi/(2*J))^2;
+    rk4Radius = 2.785293563;
+
+    fprintf('\nALLEN-CAHN BE-RK4 vs BE-IM2 COMPARISON\n');
+    fprintf('J=%d, N=%d, P=[%s], K=[%s], epsilon=%.4g\n', ...
+        J,N,num2str(workerList),num2str(KparList),epsilon);
+    fprintf('nRepeats=%d; summary statistics = mean +/- SAMPLE SD\n',nRepeats);
+    fprintf('Original client thread count: %d; timed client count: %d\n', ...
+        originalClientThreads,maxNumCompThreads);
+    fprintf('Matrix construction, reference, warm-up and pool start excluded.\n');
+    fprintf('Newton solves (including required sparse factorizations) included.\n');
+
+    for ic=1:numel(fineConfigs)
+        M = fineConfigs(ic).M;
+        method = fineConfigs(ic).method;
+        dt = DeltaT/M;
+        cfl = diffusionCoeff*dt/h^2;
+        fineConfigs(ic).CFL = cfl;
+        if strcmp(method,'RK4') && dt*maxNegEig > rk4Radius
+            error('RK4 unstable at M=%d (CFL %.4f); increase M.',M,cfl);
+        end
+        fprintf('%-3s  M=%5d  dt=%.4e  diffusion CFL=%.6g\n', ...
+            method,M,dt,cfl);
+    end
+
+    %% -------------------- COMMON REFERENCE (not timed) -------------
+    % Reference is computed once and is NOT used in the speedup numerator.
+    fprintf('\nComputing common RK4 reference (Mref=%d; excluded from timing)...\n',Mref);
+    if (DeltaT/Mref)*maxNegEig > rk4Radius
+        error('Common reference RK4 is outside its diffusion stability interval.');
+    end
+    % Client JIT warm-up is also outside timing.
+    dummy = finePropGeneric(u0,A,reaction,reactionPrime, ...
+        min(10,Mref)*DeltaT/Mref,min(10,Mref), ...
+        'RK4',newtonTol,newtonMaxit);
+    dummy = coarseBackwardEuler(u0,A,reaction,reactionPrime, ...
+        DeltaT,newtonTol,newtonMaxit);
+    clear dummy;
+
+    uReference = serialFineFinal(u0,A,reaction,reactionPrime, ...
+        T,N,Mref,'RK4',newtonTol,newtonMaxit);
+    if any(~isfinite(uReference))
+        error('Common reference failed: NaN or Inf.');
+    end
+
+    %% -------------------- SERIAL FINE TIMING, POOL CLOSED ---------
+    numConfig = numel(fineConfigs);
+    serialMean = zeros(numConfig,1);
+    serialSD = zeros(numConfig,1);
+    fineErrToRef = zeros(numConfig,1);
+    serialFineFinals = cell(numConfig,1);
+    rawSerialTimes = cell(numConfig,1);
+
+    for ic=1:numConfig
+        method = fineConfigs(ic).method;
+        M = fineConfigs(ic).M;
+        fprintf('\nSerial baseline: %s, M=%d\n',method,M);
+
+        % Exactly the actual fine dt, but a shorter warm-up duration.
+        warmSteps = min(M,10);
+        dummy = finePropGeneric(u0,A,reaction,reactionPrime, ...
+            warmSteps*DeltaT/M,warmSteps,method, ...
+            newtonTol,newtonMaxit);
+        clear dummy;
+
+        measured = zeros(nRepeats,1);
+        uFine = [];
+        for ir=1:nRepeats
+            t0 = tic;
+            uFine = serialFineFinal(u0,A,reaction,reactionPrime, ...
+                T,N,M,method,newtonTol,newtonMaxit);
+            measured(ir) = toc(t0);
+            fprintf('  serial run %d/%d: %.6f s\n',ir,nRepeats,measured(ir));
+        end
+
+        serialFineFinals{ic} = uFine;
+        fineErrToRef(ic) = gridNorm(uFine-uReference,h);
+        serialMean(ic) = mean(measured);
+        serialSD(ic) = std(measured,0);   % sample SD (denominator n-1)
+        rawSerialTimes{ic} = measured;
+
+        fprintf('  Tser = %.6f +/- %.6f s; fine error vs ref = %.6e\n', ...
+            serialMean(ic),serialSD(ic),fineErrToRef(ic));
+    end
+
+    %% -------------------- PARAREAL TIMING --------------------------
+    summaryRows = cell(0,14);
+    rawPararealTimes = cell(0,1);
+    rawInitialCoarseTimes = cell(0,1);
+    rawFinePhaseTimes = cell(0,1);
+    rawCorrectionTimes = cell(0,1);
+
+    for ip=1:numel(workerList)
+        P = workerList(ip);
+        fprintf('\nOpening %d-worker pool (not timed)...\n',P);
+        pool = parpool('local',P);
+        if pool.NumWorkers~=P
+            error('Pool started with %d workers instead of %d.',pool.NumWorkers,P);
+        end
+
+        for ic=1:numConfig
+            method = fineConfigs(ic).method;
+            M = fineConfigs(ic).M;
+            cfl = fineConfigs(ic).CFL;
+
+            % Worker warm-up, excluded from timings. Same dt as actual test.
+            warmSteps = min(M,10);
+            warmDT = warmSteps*DeltaT/M;
+            warmCheck = zeros(P,1);
+            parfor iw=1:P
+                warmY = finePropGeneric(u0,A,reaction,reactionPrime, ...
+                    warmDT,warmSteps,method,newtonTol,newtonMaxit);
+                warmCheck(iw) = warmY(1);
+            end
+            if any(~isfinite(warmCheck))
+                error('Worker warm-up produced NaN or Inf.');
+            end
+
+            for ik=1:numel(KparList)
+                K = KparList(ik);
+                measured = zeros(nRepeats,1);
+                measuredInitial = zeros(nRepeats,1);
+                measuredFine = zeros(nRepeats,1);
+                measuredCorrection = zeros(nRepeats,1);
+                Upar = [];
+
+                fprintf('\nParareal: %s, M=%d, P=%d, K=%d\n',method,M,P,K);
+                for ir=1:nRepeats
+                    t0 = tic;
+                    [Upar,timing] = runPararealBEFineParallel( ...
+                        u0,A,reaction,reactionPrime,T,N,M,K, ...
+                        method,newtonTol,newtonMaxit);
+                    measured(ir) = toc(t0);
+                    measuredInitial(ir) = timing.initialCoarse;
+                    measuredFine(ir) = sum(timing.fine);
+                    measuredCorrection(ir) = sum(timing.correction);
+                    fprintf('  Parareal run %d/%d: %.6f s\n', ...
+                        ir,nRepeats,measured(ir));
+                end
+
+                yPar = Upar(end,:).';
+                if any(~isfinite(yPar))
+                    error('Parareal final state contains NaN or Inf.');
+                end
+                tParMean = mean(measured);
+                tParSD = std(measured,0);
+                speedup = serialMean(ic)/tParMean;
+                efficiency = 100*speedup/P;
+                errRef = gridNorm(yPar-uReference,h);
+                errFine = gridNorm(yPar-serialFineFinals{ic},h);
+
+                fprintf('  Tser %.6f +/- %.6f s; Tpar %.6f +/- %.6f s\n', ...
+                    serialMean(ic),serialSD(ic),tParMean,tParSD);
+                fprintf('  S=%.4f, E=%.2f%%; errRef=%.6e; errOwnFine=%.6e\n', ...
+                    speedup,efficiency,errRef,errFine);
+
+                summaryRows(end+1,:) = {method,M,P,K,cfl, ...
+                    serialMean(ic),serialSD(ic),tParMean,tParSD, ...
+                    speedup,efficiency,fineErrToRef(ic),errRef,errFine}; %#ok<SAGROW>
+                rawPararealTimes{end+1,1} = measured; %#ok<SAGROW>
+                rawInitialCoarseTimes{end+1,1} = measuredInitial; %#ok<SAGROW>
+                rawFinePhaseTimes{end+1,1} = measuredFine; %#ok<SAGROW>
+                rawCorrectionTimes{end+1,1} = measuredCorrection; %#ok<SAGROW>
+            end
+        end
+
+        % Pool shutdown is not included in measured wall time.
+        delete(pool);
+        pool = [];
+    end
+
+    %% -------------------- OUTPUT -------------------------------
+    varNames = {'FineMethod','M','P','K','CFL', ...
+        'SerialMean_s','SerialSD_s','PararealMean_s','PararealSD_s', ...
+        'Speedup','Efficiency_percent','FineErrorToRef', ...
+        'PararealErrorToRef','PararealErrorToOwnFine'};
+    ComparisonTable = cell2table(summaryRows,'VariableNames',varNames);
+    fprintf('\nCOMPLETE RESULTS (mean +/- sample SD):\n');
+    disp(ComparisonTable);
+
+    if saveResults
+        csvPath = fullfile(outputFolder,'AllenCahn_BE_RK4_vs_BE_IM2.csv');
+        matPath = fullfile(outputFolder,'AllenCahn_BE_RK4_vs_BE_IM2_raw.mat');
+        writetable(ComparisonTable,csvPath);
+        save(matPath,'ComparisonTable','fineConfigs','KparList','workerList', ...
+            'rawSerialTimes','rawPararealTimes', ...
+            'rawInitialCoarseTimes','rawFinePhaseTimes','rawCorrectionTimes', ...
+            'uReference','Mref','J','N','T','epsilon', ...
+            'nRepeats','newtonTol','newtonMaxit');
+
+        % Compatible with R2018b; no exportgraphics dependency.
+        f1 = figure('Visible','off');
+        bar(ComparisonTable.Speedup);
+        set(gca,'XTick',1:height(ComparisonTable));
+        labels = cell(height(ComparisonTable),1);
+        for i=1:height(ComparisonTable)
+            labels{i} = sprintf('%s-M%d-k%d', ...
+                ComparisonTable.FineMethod{i}, ...
+                ComparisonTable.M(i),ComparisonTable.K(i));
+        end
+        set(gca,'XTickLabel',labels,'XTickLabelRotation',50);
+        ylabel('Speedup T_{ser}/T_{par}');
+        title('Allen-Cahn: RK4 and IM2 fine propagators');
+        grid on;
+        print(f1,fullfile(outputFolder,'speedup_comparison.png'),'-dpng','-r300');
+        close(f1);
+
+        f2 = figure('Visible','off');
+        rk4rows = strcmp(ComparisonTable.FineMethod,'RK4');
+        im2rows = strcmp(ComparisonTable.FineMethod,'IM2');
+        loglog(ComparisonTable.PararealMean_s(rk4rows), ...
+            ComparisonTable.PararealErrorToRef(rk4rows),'o','MarkerSize',7);
+        hold on;
+        loglog(ComparisonTable.PararealMean_s(im2rows), ...
+            ComparisonTable.PararealErrorToRef(im2rows),'s','MarkerSize',7);
+        xlabel('Parareal wall time (s)');
+        ylabel('Error relative to common reference (discrete L2)');
+        legend('BE-RK4','BE-IM2','Location','best');
+        title('Accuracy vs. measured wall time');
+        grid on;
+        print(f2,fullfile(outputFolder,'accuracy_runtime_comparison.png'),'-dpng','-r300');
+        close(f2);
+
+        fprintf('\nSaved CSV, MAT and figures in: %s\n',outputFolder);
+    end
+
+    maxNumCompThreads(originalClientThreads);
+    fprintf('Restored original MATLAB client thread setting.\n');
+
+catch ME
+    try
+        pool = gcp('nocreate');
+        if ~isempty(pool)
+            delete(pool);
+        end
+    catch
+    end
+    try
+        maxNumCompThreads(originalClientThreads);
+    catch
+    end
+    rethrow(ME);
+end
+
+%% =====================================================================
+% LOCAL FUNCTIONS
+% =====================================================================
+
+
+function y = serialFineFinal(u0,A,f,fp,T,N,M,method,tol,maxit)
+    DeltaT = T/N;
+    y = u0(:);
+    for n=1:N
+        y = finePropGeneric(y,A,f,fp,DeltaT,M,method,tol,maxit);
+    end
+end
+
+function y = finePropGeneric(v,A,f,fp,DeltaT,M,method,tol,maxit)
+    switch upper(method)
+        case 'RK4'
+            y = finePropRK4(v,A,f,DeltaT,M);
+        case 'IM2'
+            y = finePropIM2(v,A,f,fp,DeltaT,M,tol,maxit);
+        otherwise
+            error('Unknown fine propagator %s.',method);
+    end
+end
+
+function [Upar,timing] = runPararealBEFineParallel( ...
+    u0,A,f,fp,T,N,M,K,method,newtonTol,newtonMaxit)
+    ndof = numel(u0);
+    DeltaT = T/N;
+    timing.initialCoarse = 0;
+    timing.fine = zeros(K,1);
+    timing.correction = zeros(K,1);
+
+    t0 = tic;
+    Uold = zeros(N+1,ndof);
+    Uold(1,:) = u0(:).';
+    GoldStored = zeros(N,ndof);
+    for n=1:N
+        Gv = coarseBackwardEuler(Uold(n,:).',A,f,fp, ...
+            DeltaT,newtonTol,newtonMaxit);
+        Uold(n+1,:) = Gv.';
+        GoldStored(n,:) = Gv.';
+    end
+    timing.initialCoarse = toc(t0);
+
+    for k=1:K
+        % All N fine tasks are independent and use the same selected
+        % method/M as the serial fine reference for this configuration.
+        fineOld = zeros(N,ndof);
+        tf = tic;
+        parfor n=1:N
+            fineValue = finePropGeneric(Uold(n,:).',A,f,fp, ...
+                DeltaT,M,method,newtonTol,newtonMaxit);
+            fineOld(n,:) = fineValue.';
+        end
+        timing.fine(k) = toc(tf);
+        if any(~isfinite(fineOld(:)))
+            error('Parallel fine propagator returned NaN or Inf.');
+        end
+
+        tc = tic;
+        Unew = zeros(N+1,ndof);
+        Unew(1,:) = u0(:).';
+        GnewStored = zeros(N,ndof);
+        for n=1:N
+            Gnew = coarseBackwardEuler(Unew(n,:).',A,f,fp, ...
+                DeltaT,newtonTol,newtonMaxit);
+            Unew(n+1,:) = (Gnew + fineOld(n,:).' ...
+                - GoldStored(n,:).').';
+            if any(~isfinite(Unew(n+1,:)))
+                error('Parareal correction produced NaN or Inf.');
+            end
+            GnewStored(n,:) = Gnew.';
+        end
+        timing.correction(k) = toc(tc);
+        Uold = Unew;
+        GoldStored = GnewStored;
+    end
+    Upar = Uold;
+end
+
+function y = finePropIM2(v,A,f,fp,DeltaT,M,tol,maxit)
+    dt = DeltaT/M;
+    y = v(:);
+    I = speye(numel(y));
+    for m=1:M
+        y = implicitMidpointStep(y,A,f,fp,I,dt,tol,maxit);
+        if any(~isfinite(y))
+            error('Fine IM2 produced NaN or Inf at step %d of %d.',m,M);
+        end
+    end
+end
+
+function ynew = implicitMidpointStep(v,A,f,fp,I,dt,tol,maxit)
+    % Solve for midpoint stage w:
+    %   w = v + (dt/2)*(A*w + f(w)),   y_{n+1} = 2*w - v.
+    % Using w, not y_{n+1}, prevents a factor-of-two Jacobian error.
+    v = v(:);
+    halfdt = 0.5*dt;
+    n = numel(v);
+    % Semi-implicit starting guess; this setup/solve is part of timing.
+    w = (I-halfdt*A)\(v+halfdt*f(v));
+
+    for it=1:maxit
+        residual = w-v-halfdt*(A*w+f(w));
+        residualNorm = norm(residual,inf);
+        if ~isfinite(residualNorm)
+            error('IM2 Newton residual is not finite.');
+        end
+        if residualNorm <= tol*(1+norm(v,inf))
+            ynew = 2*w-v;
+            return;
+        end
+        Jacobian = I-halfdt*A-halfdt*spdiags(fp(w),0,n,n);
+        delta = -Jacobian\residual;
+        if any(~isfinite(delta))
+            error('IM2 Newton increment is not finite.');
+        end
+        accepted = false;
+        lambda = 1.0;
+        for ls=1:25
+            wTrial = w+lambda*delta;
+            if all(isfinite(wTrial))
+                trialResidual = wTrial-v-halfdt*(A*wTrial+f(wTrial));
+                if all(isfinite(trialResidual)) && ...
+                        (norm(trialResidual,inf) <= ...
+                         (1-1e-4*lambda)*residualNorm || lambda<1e-8)
+                    w = wTrial;
+                    accepted = true;
+                    break;
+                end
+            end
+            lambda = 0.5*lambda;
+        end
+        if ~accepted
+            error('IM2 damped Newton line search failed.');
+        end
+    end
+    error('IM2 Newton failed after %d iterations.',maxit);
+end
+
+function u0 = allenCahnInitialCondition(x)
+
+    u0 = ...
+        0.8*sin(2.0*pi*x);
+
+    u0 = ...
+        u0(:);
+
+end
+
+% -------------------------------------------------------------------------
+
+function A = buildDiffusionMatrix( ...
+    J,L,diffusionCoeff)
+
+    h = ...
+        L/J;
+
+    n = ...
+        J-1;
+
+    e = ...
+        ones(n,1);
+
+    A0 = ...
+        spdiags( ...
+            [e -2.0*e e], ...
+            [-1 0 1], ...
+            n,n);
+
+    A = ...
+        (diffusionCoeff/h^2)*A0;
+
+end
+
+% -------------------------------------------------------------------------
+
+function y = coarseBackwardEuler( ...
+    v,A,f,fp,dt,tol,maxit)
+
+    v = ...
+        v(:);
+
+    if any(~isfinite(v))
+
+        error( ...
+            'Backward Euler received NaN or Inf in its input vector.');
+
+    end
+
+    n = ...
+        numel(v);
+
+    I = ...
+        speye(n);
+
+    % Stable semi-implicit initial guess
+    y = ...
+        (I-dt*A) ...
+        \ (v + dt*f(v));
+
+    if any(~isfinite(y))
+
+        error( ...
+            'Backward Euler initial guess contains NaN or Inf.');
+
+    end
+
+    for it = 1:maxit
+
+        residual = ...
+            y ...
+            - v ...
+            - dt*( ...
+                A*y ...
+                + f(y));
+
+        if any(~isfinite(residual))
+
+            error( ...
+                'Backward Euler Newton residual contains NaN or Inf.');
+
+        end
+
+        residualNorm = ...
+            norm(residual,inf);
+
+        if residualNorm <= ...
+                tol*(1.0 + norm(v,inf))
+
+            return;
+
+        end
+
+        diagonalReaction = ...
+            fp(y);
+
+        if any(~isfinite(diagonalReaction))
+
+            error( ...
+                'Backward Euler Jacobian contains NaN or Inf.');
+
+        end
+
+        Jacobian = ...
+            I ...
+            - dt*A ...
+            - dt*spdiags( ...
+                diagonalReaction, ...
+                0, ...
+                n,n);
+
+        delta = ...
+            -Jacobian\residual;
+
+        if any(~isfinite(delta))
+
+            error( ...
+                'Backward Euler Newton step contains NaN or Inf.');
+
+        end
+
+        lambda = ...
+            1.0;
+
+        accepted = ...
+            false;
+
+        for ls = 1:25
+
+            yTrial = ...
+                y + lambda*delta;
+
+            if any(~isfinite(yTrial))
+
+                lambda = ...
+                    0.5*lambda;
+
+                continue;
+
+            end
+
+            residualTrial = ...
+                yTrial ...
+                - v ...
+                - dt*( ...
+                    A*yTrial ...
+                    + f(yTrial));
+
+            if any(~isfinite(residualTrial))
+
+                lambda = ...
+                    0.5*lambda;
+
+                continue;
+
+            end
+
+            if norm(residualTrial,inf) <= ...
+                    (1.0-1.0e-4*lambda)*residualNorm ...
+                    || lambda < 1.0e-8
+
+                y = ...
+                    yTrial;
+
+                accepted = ...
+                    true;
+
+                break;
+
+            end
+
+            lambda = ...
+                0.5*lambda;
+
+        end
+
+        if ~accepted
+
+            error( ...
+                'Backward Euler damped Newton line search failed.');
+
+        end
+
+    end
+
+    error( ...
+        'Backward Euler Newton iteration did not converge.');
+
+end
+
+% -------------------------------------------------------------------------
+
+function y = finePropRK4( ...
+    v,A,f,DeltaT,M)
+
+    dt = ...
+        DeltaT/M;
+
+    y = ...
+        v(:);
+
+    for m = 1:M
+
+        y = ...
+            rk4Step( ...
+                y, ...
+                A, ...
+                f, ...
+                dt);
+
+        if any(~isfinite(y))
+
+            error( ...
+                ['Fine RK4 produced NaN or Inf at fine step ', ...
+                 '%d of %d. Check the RK4 stability condition.'], ...
+                m, ...
+                M);
+
+        end
+
+    end
+
+end
+
+% -------------------------------------------------------------------------
+
+function ynew = rk4Step( ...
+    y,A,f,dt)
+
+    k1 = ...
+        A*y + f(y);
+
+    y2 = ...
+        y + 0.5*dt*k1;
+
+    k2 = ...
+        A*y2 + f(y2);
+
+    y3 = ...
+        y + 0.5*dt*k2;
+
+    k3 = ...
+        A*y3 + f(y3);
+
+    y4 = ...
+        y + dt*k3;
+
+    k4 = ...
+        A*y4 + f(y4);
+
+    ynew = ...
+        y ...
+        + (dt/6.0) ...
+        * ( ...
+            k1 ...
+            + 2.0*k2 ...
+            + 2.0*k3 ...
+            + k4 ...
+          );
+
+end
+
+% -------------------------------------------------------------------------
+
+function nr = gridNorm(x,h)
+
+    nr = ...
+        sqrt( ...
+            h*sum(abs(x).^2) ...
+        );
+
+end
