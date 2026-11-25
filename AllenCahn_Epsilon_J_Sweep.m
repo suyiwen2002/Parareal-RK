@@ -1,4 +1,19 @@
-
+%% AllenCahn_Epsilon_J_Sensitivity.m
+% Parameter-sensitivity experiment for the Allen--Cahn equation.
+%
+%     u_t = epsilon^2 * u_xx + u - u^3,  0 < x < 1, 0 < t <= 1.
+%     u(0,t) = u(1,t) = 0,
+%     u(x,0) = 0.8*sin(2*pi*x).
+%
+% Unlike joint spatial--temporal refinement, N and M are FIXED here.
+% Only epsilon and J vary. Each (epsilon,J) has its own semidiscrete
+% system and own high-accuracy serial RK4 reference.
+%
+% Coarse: BE (p=1).  Fine: classical RK4 (q=4).
+% Errors: max_n ||U_n^(k) - U_ref(T_n)||_h, k=0,...,3.
+%
+% Based on the user's original Parareal_RK_AllenCahn_General.m.
+% The existing local solver functions below are retained unchanged.
 
 clear; clc; close all;
 
