@@ -1,0 +1,952 @@
+function FisherKPP2D_Reviewer4_FinalBenchmark_SaveFix()
+% FISHERKPP2D_REVIEWER4_FINALBENCHMARK_SAVEFIX
+% Complete, reproducible terminal-accuracy-matched benchmark addressing
+% reviewer Comment 4 for the semidiscrete 2-D Fisher-KPP equation.
+%
+% PDE:  u_t = D*(u_xx+u_yy)+r*u.*(1-u), on (0,1)^2, Dirichlet u=0.
+% Initial condition: exp(-alpha*((x-0.5)^2+(y-0.5)^2)).
+% Grid unknowns: (J-1)^2, discrete L2 norm: h*norm(v,2).
+%
+% METHOD COMPARISON (same spatial grid and same high-accuracy RK4 reference):
+%   A. Serial BE, screened across multiple time-step counts.
+%   B. Serial classical RK4, screened near the diffusion CFL limit.
+%   C. Parareal BE-RK4, optimize N, P, and K; choose M by fine RK4 CFL.
+%
+% PAPER'S ACCURACY REQUIREMENT (TERMINAL TIME ONLY):
+%   E_final = h*norm(U(T)-U_ref(T),2) <= tau.
+% Each algorithm may achieve a smaller error; the common requirement is
+% qualification under the same tau, NOT numerically identical errors.
+%
+% Fair compute-kernel timing: 5 runs after warm-up, report mean and SAMPLE
+% SD; excludes reference computation, candidate screening, LU setup,
+% parpool startup, and warm-up. Nonlinear Newton fallback factorization
+% DURING propagation IS INCLUDED in each method's measured time.
+%
+% The best serial reference is the fastest measured QUALIFYING method among
+% the TESTED BE and RK4 configurations. It is not a proven global optimum
+% across all possible serial integrators.
+%
+% All failures are explicit (NaN error, failure message); failed solves
+% cannot enter the qualified comparison.
+%
+% Select caseMode='long' for the final large/long-time experiment, or
+% caseMode='all' to recompute all three cases under identical code rules.
+%
+% MATLAB with Parallel Computing Toolbox is needed for P>1.
+% No MATLAB runtime is available in the assistant's execution environment;
+% the code requires actual validation on your machine.
+
+%% ========================= USER SETTINGS ===============================
+caseMode = 'all';           % 'baseline' (J80,T5), 'middle' (J80,T10),
+% 'long' (J160,T20), or 'all'
+Nlist = [16 32 64 128];
+Plist = [8 16 32];           % Workers; automatically skip P>N
+Kmax = 4;
+tolerances = [1e-4 1e-5];
+
+targetFineCFL = 0.30;       % Diffusion RK4 CFL; conservative (<0.3482)
+pilotRepeats = 2;
+confirmRepeats = 5;
+serialRepeats = 5;
+topPilotPairsPerTolerance = 4;
+
+% Robust implicit BE nonlinear solver; used IDENTICALLY in serial BE
+% and in Parareal's coarse propagation.
+nonlin.tol = 1e-10;
+nonlin.picardMax = 14;
+nonlin.newtonMax = 12;
+nonlin.maxBacktrack = 18;
+nonlin.minDecrease = 1e-4;
+
+saveResults = true;
+outputRoot = 'FisherKPP2D-Reviewer4-SaveFix';
+% ========================================================================
+
+assert(all(Nlist>=1 & Nlist==floor(Nlist)));
+assert(all(Plist>=1 & Plist==floor(Plist)));
+assert(all(tolerances>0));
+assert(Kmax>=1 && pilotRepeats>=2 && confirmRepeats>=2 && serialRepeats>=2);
+assert(targetFineCFL>0 && targetFineCFL<=0.30);
+
+if strcmpi(caseMode,'all')
+caseList = {'baseline','middle','long'};
+else
+caseList = {lower(caseMode)};
+end
+
+% Preflight output path and CSV-writing BEFORE expensive PDE calculations.
+% Use a valid absolute path with ASCII-only file/folder names.
+% This also protects caseMode='all' against permission or invalid-name
+% problems detected only after a case has completed.
+if saveResults
+outputDir = chooseWritableOutputDir();
+fprintf('CSV output directory: %s\n',outputDir);
+else
+outputDir = '';
+fprintf('CSV saving disabled (results still printed to console).\n');
+end
+
+% Same client threading constraint used in earlier experiments.
+originalThreads=maxNumCompThreads;
+maxNumCompThreads(1);
+threadRestore=onCleanup(@() maxNumCompThreads(originalThreads)); %#ok<NASGU>
+
+% LU permutation identity is tested immediately, before expensive runs.
+smallA=sparse([-2 1;1 -2]);
+smallI=speye(2);
+[smallSolver,~]=prepareBE(smallA,smallI,0.1);
+b=[1;2];
+z=solveBE(smallSolver,b);
+assert(norm((smallI-0.1*smallA)*z-b,inf)<1e-11, ...
+'Sparse LU self-test failed.');
+clear smallA smallI smallSolver b z
+
+overallNames={'Case','Tolerance','BestSerialMethod','SerialNsteps', ...
+'SerialErrorFinal','SerialMean_s','SerialSD_s', ...
+'PararealN','PararealM','PararealP','PararealK', ...
+'PararealErrorFinal','PararealMean_s','PararealSD_s', ...
+'SpeedupVsBestSerial','SpeedupVsSerialBE','SpeedupVsSerialRK4'};
+overallRows=cell(0,numel(overallNames));
+
+for caseIndex=1:numel(caseList)
+name=caseList{caseIndex};
+switch name
+case 'baseline'
+J=80; T=5;
+case 'middle'
+J=80; T=10;
+case 'long'
+J=160; T=20;
+otherwise
+error('Unknown caseMode: %s',name);
+end
+
+cfg=struct();
+cfg.name=name; cfg.J=J; cfg.T=T; cfg.L=1; cfg.D=0.01;
+cfg.r=1; cfg.alpha=100;
+cfg.Nlist=unique(Nlist(:).');
+cfg.Plist=unique(Plist(:).');
+cfg.Kmax=Kmax;
+cfg.tolerances=tolerances(:).';
+cfg.targetFineCFL=targetFineCFL;
+cfg.pilotRepeats=pilotRepeats;
+cfg.confirmRepeats=confirmRepeats;
+cfg.serialRepeats=serialRepeats;
+cfg.topPilotPairsPerTolerance=topPilotPairsPerTolerance;
+cfg.nonlin=nonlin;
+cfg.saveResults=saveResults;
+cfg.prefix=fullfile(outputDir,[outputRoot '-' name '-']);
+
+caseRows=runCase(cfg);
+overallRows=[overallRows;caseRows]; %#ok<AGROW>
+
+end
+
+Overall=tableFromRows(overallRows,overallNames,[1 3]);
+fprintf('\n==========================================================\n');
+fprintf('FINAL REVIEWER-4 ACCURACY-MATCHED SUMMARY\n');
+fprintf('Only final-time error counts toward qualification.\n');
+fprintf('Speedup > 1: Parareal faster than that named serial baseline.\n');
+fprintf('A speedup < 1 is a legitimate result and must be reported.\n');
+fprintf('==========================================================\n');
+disp(Overall);
+if saveResults
+outputName=fullfile(outputDir,[outputRoot '-OverallSummary.csv']);
+safeWriteTable(Overall,outputName);
+end
+end % main
+
+function caseRows=runCase(cfg)
+% One problem instance; a single reference shared by ALL methods/configs.
+% Ensure serial timings start without a leftover multiworker pool from a
+% previous case. The pool is recreated for Parareal, OUTSIDE timed calls.
+oldPool=gcp('nocreate');
+if ~isempty(oldPool)
+fprintf('Closing an existing parallel pool before serial benchmarks...\n');
+delete(oldPool);
+end
+J=cfg.J; T=cfg.T; L=cfg.L; D=cfg.D; r=cfg.r; alpha=cfg.alpha;
+h=L/J;
+[x,y]=meshgrid((1:J-1)*h,(1:J-1)*h);
+u0=exp(-alpha*((x-L/2).^2+(y-L/2).^2));
+u0=u0(:);
+ndof=numel(u0);
+e=ones(J-1,1);
+T1=spdiags([e -2*e e],[-1 0 1],J-1,J-1);
+A=(D/h^2)*(kron(speye(J-1),T1)+kron(T1,speye(J-1)));
+I=speye(ndof);
+rhoDiff=8*D/h^2*cos(pi/(2*J))^2;
+rk4AxisLimit=2.785293563;
+minStableSteps=floor(T*rhoDiff/rk4AxisLimit)+1;
+
+fprintf('\n===============================================================\n');
+fprintf('CASE %s: J=%d, T=%g, dof=%d, D=%g, r=%g\n', ...
+cfg.name,J,T,ndof,D,r);
+fprintf('N: %s; P: %s; K=1..%d\n', ...
+mat2str(cfg.Nlist),mat2str(cfg.Plist),cfg.Kmax);
+fprintf('Tolerances: %s; fine CFL target %.2f\n', ...
+mat2str(cfg.tolerances),cfg.targetFineCFL);
+fprintf('Terminal metric: E=h*norm(U(T)-Uref(T),2) <= tolerance.\n');
+fprintf('Five-run results include nonlinear-solver fallbacks if triggered.\n');
+fprintf('===============================================================\n');
+
+%% Common independent reference, checked by temporal refinement.
+Nref=40;
+MrefCoarse=ceil(max(40000,2*minStableSteps)/Nref);
+MrefFine=2*MrefCoarse;
+fprintf('Reference: RK4 with %d and %d total steps...\n', ...
+Nref*MrefCoarse,Nref*MrefFine);
+yRef1=serialRK4(u0,A,r,T,Nref*MrefCoarse);
+yRef=serialRK4(u0,A,r,T,Nref*MrefFine);
+referenceDiff=h*norm(yRef-yRef1,2);
+fprintf('Reference self-difference: %.8e\n',referenceDiff);
+assert(referenceDiff<=min(cfg.tolerances)/100, ...
+'Reference time-grid convergence check failed.');
+clear yRef1
+
+failureColumns={'Method','N','P','K','Stage','Message'};
+failureRows=cell(0,numel(failureColumns));
+
+%% Serial BE: screen increasing Nsteps, then time first qualifying
+% count for each tau AND up to two larger counts for a local timing check.
+beCandidates=[20 40 80 160 320 640 1280 2560 ...
+5120 10240 20480 40960 81920 163840];
+if strcmp(cfg.name,'long')
+beCandidates=beCandidates(beCandidates<=40960);
+elseif strcmp(cfg.name,'middle')
+beCandidates=beCandidates(beCandidates<=81920);
+end
+
+screenCols={'Method','Nsteps','StepSize','ErrorFinal','Succeeded','Message'};
+screenRows=cell(0,numel(screenCols));
+serialCols={'Method','Nsteps','ErrorFinal','MeanTime_s','SDTime_s','LUSetup_s'};
+serialRows=cell(0,numel(serialCols));
+beErr=nan(size(beCandidates));
+tightestHit=inf;
+fprintf('\n--- SCREEN SERIAL BE ---\n');
+for i=1:numel(beCandidates)
+ns=beCandidates(i);
+dt=T/ns;
+try
+[solver,~]=prepareBE(A,I,dt);
+y=serialBE(u0,A,r,T,ns,solver,cfg.nonlin);
+E=h*norm(y-yRef,2);
+if ~isfinite(E)
+error('Nonfinite terminal BE error.');
+end
+beErr(i)=E;
+screenRows(end+1,:)={'Serial BE',ns,dt,E,true,''}; %#ok<AGROW>
+fprintf('Serial BE ns=%6d E=%.7e\n',ns,E);
+if E<=min(cfg.tolerances) && ~isfinite(tightestHit)
+tightestHit=i;
+end
+catch ME
+screenRows(end+1,:)={'Serial BE',ns,dt,NaN,false,ME.message}; %#ok<AGROW>
+failureRows(end+1,:)={'Serial BE',ns,1,NaN,'screen',ME.message}; %#ok<AGROW>
+fprintf('Serial BE ns=%6d FAILED: %s\n',ns,ME.message);
+end
+if isfinite(tightestHit) && i>=tightestHit+2
+break;
+end
+end
+% Only entries actually screened are eligible for subsequent timing.
+nScreenBE=size(screenRows,1);
+beCandidates=beCandidates(1:nScreenBE);
+beErr=beErr(1:nScreenBE);
+beTimingIdx=[];
+for it=1:numel(cfg.tolerances)
+hit=find(isfinite(beErr) & beErr<=cfg.tolerances(it),1,'first');
+if ~isempty(hit)
+beTimingIdx=[beTimingIdx,hit:min(hit+2,nScreenBE)]; %#ok<AGROW>
+end
+end
+beTimingIdx=unique(beTimingIdx);
+fprintf('\n--- TIME ELIGIBLE SERIAL BE CONFIGURATIONS ---\n');
+for i=beTimingIdx
+if ~isfinite(beErr(i)),continue;end
+ns=beCandidates(i);
+try
+[solver,tLU]=prepareBE(A,I,T/ns);
+serialBE(u0,A,r,T,ns,solver,cfg.nonlin); % warm-up
+times=zeros(cfg.serialRepeats,1);
+errs=zeros(cfg.serialRepeats,1);
+for rep=1:cfg.serialRepeats
+tt=tic;
+y=serialBE(u0,A,r,T,ns,solver,cfg.nonlin);
+times(rep)=toc(tt);
+errs(rep)=h*norm(y-yRef,2);
+end
+E=max(errs); % conservative repeated-run terminal error
+serialRows(end+1,:)={'Serial BE',ns,E,mean(times),std(times),tLU}; %#ok<AGROW>
+fprintf('BE ns=%d: E=%.6e, T=%.6f +/- %.6f s\n', ...
+ns,E,mean(times),std(times));
+catch ME
+failureRows(end+1,:)={'Serial BE',ns,1,NaN,'timing',ME.message}; %#ok<AGROW>
+fprintf('BE ns=%d timed evaluation FAILED: %s\n',ns,ME.message);
+end
+end
+
+%% Serial RK4: screen near stability bound. Time EVERY screened grid
+% that qualifies at least one tolerance (fair competitive baseline).
+% Accept only stable and finite results.
+rkMultipliers=[1.003 1.012 1.03 1.06 1.12 1.25 1.50];
+rkCandidates=unique(ceil(minStableSteps*rkMultipliers));
+rkCandidates=rkCandidates(rkCandidates>=minStableSteps);
+rkErr=nan(size(rkCandidates));
+
+fprintf('\n--- SCREEN SERIAL RK4 ---\n');
+for i=1:numel(rkCandidates)
+ns=rkCandidates(i);
+dt=T/ns;
+try
+assert(dt*rhoDiff < rk4AxisLimit, ...
+'RK4 negative real-axis diffusion stability limit exceeded.');
+y=serialRK4(u0,A,r,T,ns);
+E=h*norm(y-yRef,2);
+if ~isfinite(E),error('Nonfinite RK4 error.');end
+rkErr(i)=E;
+screenRows(end+1,:)={'Serial RK4',ns,dt,E,true,''}; %#ok<AGROW>
+fprintf('Serial RK4 ns=%6d CFL=%.6f E=%.7e\n', ...
+ns,D*dt/h^2,E);
+catch ME
+screenRows(end+1,:)={'Serial RK4',ns,dt,NaN,false,ME.message}; %#ok<AGROW>
+failureRows(end+1,:)={'Serial RK4',ns,1,NaN,'screen',ME.message}; %#ok<AGROW>
+fprintf('Serial RK4 ns=%6d FAILED: %s\n',ns,ME.message);
+end
+end
+
+rkTimingIdx=find(isfinite(rkErr) & rkErr<=max(cfg.tolerances));
+fprintf('\n--- TIME ELIGIBLE SERIAL RK4 CONFIGURATIONS ---\n');
+for i=rkTimingIdx
+ns=rkCandidates(i);
+try
+serialRK4(u0,A,r,T,ns); % warm-up
+times=zeros(cfg.serialRepeats,1);
+errs=zeros(cfg.serialRepeats,1);
+for rep=1:cfg.serialRepeats
+tt=tic;
+y=serialRK4(u0,A,r,T,ns);
+times(rep)=toc(tt);
+errs(rep)=h*norm(y-yRef,2);
+end
+E=max(errs);
+serialRows(end+1,:)={'Serial RK4',ns,E,mean(times),std(times),0}; %#ok<AGROW>
+fprintf('RK4 ns=%d: E=%.6e, T=%.6f +/- %.6f s\n', ...
+ns,E,mean(times),std(times));
+catch ME
+failureRows(end+1,:)={'Serial RK4',ns,1,NaN,'timing',ME.message}; %#ok<AGROW>
+fprintf('RK4 ns=%d timed evaluation FAILED: %s\n',ns,ME.message);
+end
+end
+
+ScreenTable=tableFromRows(screenRows,screenCols,[1 6]);
+SerialTable=tableFromRows(serialRows,serialCols,1);
+
+%% Parareal pilot sweep: all N/P/K, 2 repeats per candidate.
+pCols={'N','M','P','K','FineCFL','ErrorFinal','MeanTime_s','SDTime_s', ...
+'InitialMean_s','FineMean_s','CorrectionMean_s','LUSetup_s'};
+pilotRows=cell(0,numel(pCols));
+fprintf('\n--- PILOT PARAREAL N-P-K SWEEP ---\n');
+
+for ip=1:numel(cfg.Plist)
+P=cfg.Plist(ip);
+if P>1
+ensurePool(P);
+end
+for in=1:numel(cfg.Nlist)
+N=cfg.Nlist(in);
+if P>N
+fprintf('SKIP N=%d P=%d (P>N)\n',N,P);
+continue
+end
+M=ceil(D*T/(N*h^2*cfg.targetFineCFL));
+fineCFL=D*T/(N*M*h^2);
+assert((T/(N*M))*rhoDiff<rk4AxisLimit);
+fprintf('PILOT N=%d M=%d P=%d, CFL=%.6f\n',N,M,P,fineCFL);
+try
+[gSolver,tLU]=prepareBE(A,I,T/N);
+warmWorkers(u0,A,r,T,N,M,P);
+% Unmeasured JIT / transfer warm-up, same numerical workflow.
+runPararealPath(u0,A,r,T,N,M,cfg.Kmax,gSolver, ...
+cfg.nonlin,P>1);
+[qRows,failedK,failMsg]=measureParareal( ...
+u0,A,r,T,N,M,P,cfg.Kmax,gSolver,cfg.nonlin, ...
+h,D,yRef,cfg.pilotRepeats,tLU,pCols);
+pilotRows=[pilotRows;qRows]; %#ok<AGROW>
+if ~isempty(failMsg)
+failureRows(end+1,:)={'Parareal',N,P,failedK,'pilot',failMsg}; %#ok<AGROW>
+end
+for i=1:size(qRows,1)
+fprintf(' K=%d E=%.5e T=%.5f +/- %.5f s\n', ...
+qRows{i,4},qRows{i,6},qRows{i,7},qRows{i,8});
+end
+catch ME
+failureRows(end+1,:)={'Parareal',N,P,NaN,'pilot',ME.message}; %#ok<AGROW>
+fprintf(' FAILED N=%d P=%d: %s\n',N,P,ME.message);
+end
+end
+end
+PilotTable=tableFromRows(pilotRows,pCols,[]);
+fprintf('Parareal pilot: %d successful N/P/K rows.\n',height(PilotTable));
+
+%% Pick fastest qualified PILOT N/P pairs for each tau.
+selectedPairs=zeros(0,2);
+if ~isempty(pilotRows)
+for it=1:numel(cfg.tolerances)
+tau=cfg.tolerances(it);
+candidates=find(isfinite(PilotTable.MeanTime_s) & ...
+PilotTable.ErrorFinal<=tau);
+if isempty(candidates)
+fprintf('Pilot: no candidate qualifies at tau=%g.\n',tau);
+continue
+end
+[~,order]=sort(PilotTable.MeanTime_s(candidates),'ascend');
+nTop=min(cfg.topPilotPairsPerTolerance,numel(order));
+choices=candidates(order(1:nTop));
+selectedPairs=[selectedPairs; ...
+[PilotTable.N(choices),PilotTable.P(choices)]]; %#ok<AGROW>
+end
+end
+selectedPairs=unique(selectedPairs,'rows');
+selectedPairs=sortrows(selectedPairs,[2 1]);
+fprintf('\nCONFIRM candidate N/P pairs:\n');
+disp(selectedPairs);
+
+%% Parareal confirmation with five repeats for selected N/P pairs.
+confirmedRows=cell(0,numel(pCols));
+rawCols={'N','M','P','K','Repeat','Time_s','ErrorFinal', ...
+'Initial_s','FineCumulative_s','CorrectionCumulative_s'};
+rawRows=cell(0,numel(rawCols));
+
+for ic=1:size(selectedPairs,1)
+N=selectedPairs(ic,1); P=selectedPairs(ic,2);
+M=ceil(D*T/(N*h^2*cfg.targetFineCFL));
+fprintf('CONFIRM N=%d M=%d P=%d\n',N,M,P);
+try
+if P>1
+ensurePool(P);
+end
+[gSolver,tLU]=prepareBE(A,I,T/N);
+warmWorkers(u0,A,r,T,N,M,P);
+runPararealPath(u0,A,r,T,N,M,cfg.Kmax,gSolver, ...
+cfg.nonlin,P>1);
+[qRows,failedK,failMsg,rRows]=measureParareal( ...
+u0,A,r,T,N,M,P,cfg.Kmax,gSolver,cfg.nonlin, ...
+h,D,yRef,cfg.confirmRepeats,tLU,pCols);
+confirmedRows=[confirmedRows;qRows]; %#ok<AGROW>
+rawRows=[rawRows;rRows]; %#ok<AGROW>
+if ~isempty(failMsg)
+failureRows(end+1,:)={'Parareal',N,P,failedK,'confirm',failMsg}; %#ok<AGROW>
+end
+for i=1:size(qRows,1)
+fprintf(' K=%d E=%.5e T=%.5f +/- %.5f s\n', ...
+qRows{i,4},qRows{i,6},qRows{i,7},qRows{i,8});
+end
+catch ME
+failureRows(end+1,:)={'Parareal',N,P,NaN,'confirm',ME.message}; %#ok<AGROW>
+fprintf(' CONFIRM FAILED N=%d P=%d: %s\n',N,P,ME.message);
+end
+end
+
+ConfirmedTable=tableFromRows(confirmedRows,pCols,[]);
+RawTable=tableFromRows(rawRows,rawCols,[]);
+
+%% THE PAPER'S accuracy-matched competitive comparison.
+comparisonCols={'Tolerance','Method','Nsteps','N','M','P','K', ...
+'ErrorFinal','MeanTime_s','SDTime_s','Qualified', ...
+'SpeedupVsBestSerial','SpeedupVsSerialBE', ...
+'SpeedupVsSerialRK4'};
+comparisonRows=cell(0,numel(comparisonCols));
+caseCols={'Case','Tolerance','BestSerialMethod','SerialNsteps', ...
+'SerialErrorFinal','SerialMean_s','SerialSD_s', ...
+'PararealN','PararealM','PararealP','PararealK', ...
+'PararealErrorFinal','PararealMean_s','PararealSD_s', ...
+'SpeedupVsBestSerial','SpeedupVsSerialBE','SpeedupVsSerialRK4'};
+caseRows=cell(0,numel(caseCols));
+
+fprintf('\n===============================================================\n');
+fprintf('FINAL: SAME-TERMINAL-ACCURACY COMPETITIVE COMPARISON\n');
+fprintf('CASE %s, J=%d T=%g\n',cfg.name,J,T);
+fprintf('===============================================================\n');
+for it=1:numel(cfg.tolerances)
+tau=cfg.tolerances(it);
+[beIdx,beOk]=bestSerialIndex(SerialTable,'Serial BE',tau);
+[rkIdx,rkOk]=bestSerialIndex(SerialTable,'Serial RK4',tau);
+beT=NaN; rkT=NaN;
+if beOk,beT=SerialTable.MeanTime_s(beIdx);end
+if rkOk,rkT=SerialTable.MeanTime_s(rkIdx);end
+if beOk && rkOk
+if beT<=rkT,bestIdx=beIdx;else,bestIdx=rkIdx;end
+elseif beOk
+bestIdx=beIdx;
+elseif rkOk
+bestIdx=rkIdx;
+else
+bestIdx=[];
+end
+
+pIdx=[];
+if ~isempty(confirmedRows)
+eligible=find(ConfirmedTable.ErrorFinal<=tau & ...
+isfinite(ConfirmedTable.MeanTime_s));
+if ~isempty(eligible)
+[~,ix]=min(ConfirmedTable.MeanTime_s(eligible));
+pIdx=eligible(ix);
+end
+end
+
+if ~isempty(bestIdx)
+bestSerialMethod=SerialTable.Method{bestIdx};
+bestSerialSteps=SerialTable.Nsteps(bestIdx);
+bestSerialError=SerialTable.ErrorFinal(bestIdx);
+bestSerialTime=SerialTable.MeanTime_s(bestIdx);
+bestSerialSD=SerialTable.SDTime_s(bestIdx);
+else
+bestSerialMethod='none qualified';
+bestSerialSteps=NaN;bestSerialError=NaN;
+bestSerialTime=NaN;bestSerialSD=NaN;
+end
+
+if ~isempty(pIdx)
+pN=ConfirmedTable.N(pIdx);
+pM=ConfirmedTable.M(pIdx);
+pP=ConfirmedTable.P(pIdx);
+pK=ConfirmedTable.K(pIdx);
+pE=ConfirmedTable.ErrorFinal(pIdx);
+pT=ConfirmedTable.MeanTime_s(pIdx);
+pSD=ConfirmedTable.SDTime_s(pIdx);
+else
+pN=NaN;pM=NaN;pP=NaN;pK=NaN;
+pE=NaN;pT=NaN;pSD=NaN;
+end
+
+if isfinite(pT)
+speedBest=bestSerialTime/pT;
+speedBE=beT/pT;
+speedRK4=rkT/pT;
+else
+speedBest=NaN;speedBE=NaN;speedRK4=NaN;
+end
+
+caseRows(end+1,:)={cfg.name,tau,bestSerialMethod,bestSerialSteps, ...
+bestSerialError,bestSerialTime,bestSerialSD, ...
+pN,pM,pP,pK,pE,pT,pSD,speedBest,speedBE,speedRK4}; %#ok<AGROW>
+
+if beOk
+comparisonRows(end+1,:)={tau,'Serial BE', ...
+SerialTable.Nsteps(beIdx),NaN,NaN,1,NaN, ...
+SerialTable.ErrorFinal(beIdx),beT, ...
+SerialTable.SDTime_s(beIdx),true, ...
+bestSerialTime/beT,beT/beT,rkT/beT}; %#ok<AGROW>
+end
+if rkOk
+comparisonRows(end+1,:)={tau,'Serial RK4', ...
+SerialTable.Nsteps(rkIdx),NaN,NaN,1,NaN, ...
+SerialTable.ErrorFinal(rkIdx),rkT, ...
+SerialTable.SDTime_s(rkIdx),true, ...
+bestSerialTime/rkT,beT/rkT,rkT/rkT}; %#ok<AGROW>
+end
+if ~isempty(pIdx)
+comparisonRows(end+1,:)={tau,'Parareal BE-RK4', ...
+NaN,pN,pM,pP,pK,pE,pT,pSD,true, ...
+speedBest,speedBE,speedRK4}; %#ok<AGROW>
+end
+
+fprintf('tau=%g: best tested serial=%s, T=%.5f s', ...
+tau,bestSerialMethod,bestSerialTime);
+if ~isempty(pIdx)
+fprintf('; Parareal N=%d M=%d P=%d K=%d, T=%.5f s, speedup=%.4f\n', ...
+pN,pM,pP,pK,pT,speedBest);
+else
+fprintf('; Parareal: NO confirmed qualifying configuration.\n');
+end
+
+end
+ComparisonTable=tableFromRows(comparisonRows,comparisonCols,2);
+CaseTable=tableFromRows(caseRows,caseCols,[1 3]);
+FailureTable=tableFromRows(failureRows,failureColumns,[1 5 6]);
+
+disp(ComparisonTable);
+disp(CaseTable);
+
+if cfg.saveResults
+safeWriteTable(ScreenTable,     [cfg.prefix 'SerialScreening.csv']);
+safeWriteTable(SerialTable,     [cfg.prefix 'SerialTimed.csv']);
+safeWriteTable(PilotTable,      [cfg.prefix 'PararealPilot.csv']);
+safeWriteTable(ConfirmedTable,  [cfg.prefix 'PararealConfirmed.csv']);
+safeWriteTable(RawTable,        [cfg.prefix 'PararealRaw.csv']);
+safeWriteTable(ComparisonTable, [cfg.prefix 'AccuracyMatched.csv']);
+safeWriteTable(CaseTable,       [cfg.prefix 'BestByTolerance.csv']);
+safeWriteTable(FailureTable,    [cfg.prefix 'Failures.csv']);
+fprintf('Export completed for case %s. Output folder: %s\n', ...
+cfg.name,fileparts(cfg.prefix));
+end
+end % runCase
+
+function [idx,ok]=bestSerialIndex(tbl,method,tau)
+idx=[];
+ok=false;
+if height(tbl)==0,return;end
+candidates=find(strcmp(tbl.Method,method) & ...
+tbl.ErrorFinal<=tau & isfinite(tbl.MeanTime_s));
+if isempty(candidates),return;end
+[~,j]=min(tbl.MeanTime_s(candidates));
+idx=candidates(j);
+ok=true;
+end
+
+function tbl=tableFromRows(rows,names,textCols)
+% Typed MATLAB table, including correct zero-row empty cases.
+% textCols are column indices for cell strings.
+tbl=cell2table(rows,'VariableNames',names);
+for c=1:numel(names)
+if ismember(c,textCols)
+% Force text columns to cell arrays of character vectors so that
+% strcmp(tbl.Method,...) and tbl.Method{idx} work in all releases.
+tbl.(names{c})=rows(:,c);
+else
+if isempty(rows)
+tbl.(names{c})=zeros(0,1);
+else
+tbl.(names{c})=cell2mat(rows(:,c));
+end
+end
+end
+end
+
+function ensurePool(P)
+if P<=1,return;end
+if ~license('test','Distrib_Computing_Toolbox')
+error('Parallel Computing Toolbox required when P>1.');
+end
+pool=gcp('nocreate');
+if isempty(pool)||pool.NumWorkers~=P
+if ~isempty(pool),delete(pool);end
+fprintf('Starting local parpool with %d workers (unmeasured)...\n',P);
+pool=parpool('local',P);
+end
+assert(pool.NumWorkers==P);
+end
+
+function warmWorkers(u0,A,r,T,N,M,P)
+if P<=1,return;end
+dT=T/N;
+samples=zeros(P,1);
+parfor iw=1:P
+y=fineRK4(u0,A,r,dT,M);
+samples(iw)=y(1);
+end
+assert(all(isfinite(samples)));
+end
+
+function [rows,failedK,failMessage,rawRows]=measureParareal( ...
+u0,A,r,T,N,M,P,Kmax,gSolver,nonlin,h,D,yRef,nRepeats,tLU,columns)
+% Group repeated timing by N/P, with all K time points in each run.
+% If K>1 fails, earlier valid K values are retained instead of lost.
+rawCols=10;
+rawRows=cell(0,rawCols);
+allTime=nan(nRepeats,Kmax);
+allErr=nan(nRepeats,Kmax);
+allInit=nan(nRepeats,Kmax);
+allFine=nan(nRepeats,Kmax);
+allCorr=nan(nRepeats,Kmax);
+failedK=NaN;
+failMessage='';
+
+for rep=1:nRepeats
+[ends,times,parts,stopK,stopMsg]=runPararealPath( ...
+u0,A,r,T,N,M,Kmax,gSolver,nonlin,P>1);
+if ~isempty(stopMsg)
+failedK=stopK;
+failMessage=stopMsg;
+end
+for K=1:Kmax
+if ~isfinite(times(K)),continue;end
+allTime(rep,K)=times(K);
+allErr(rep,K)=h*norm(ends(:,K)-yRef,2);
+allInit(rep,K)=parts.initial;
+allFine(rep,K)=parts.fineCum(K);
+allCorr(rep,K)=parts.corrCum(K);
+rawRows(end+1,:)={N,M,P,K,rep,times(K),allErr(rep,K), ...
+parts.initial,parts.fineCum(K),parts.corrCum(K)}; %#ok<AGROW>
+end
+end
+rows=cell(0,numel(columns));
+for K=1:Kmax
+% Only compare configurations with all requested repeats completed.
+if any(~isfinite(allTime(:,K)))||any(~isfinite(allErr(:,K)))
+continue
+end
+rows(end+1,:)={N,M,P,K,cfgCFL(T,N,M,h,D),max(allErr(:,K)), ...
+mean(allTime(:,K)),std(allTime(:,K)),mean(allInit(:,K)), ...
+mean(allFine(:,K)),mean(allCorr(:,K)),tLU}; %#ok<AGROW>
+end
+end
+
+function cfl=cfgCFL(T,N,M,h,D)
+cfl=D*T/(N*M*h^2);
+end
+
+function [ends,times,parts,failedK,failMessage]=runPararealPath( ...
+u0,A,r,T,N,M,Kmax,gSolver,nonlin,useParallel)
+% Standard cached-coarse Parareal:
+% U_{n+1}^{k+1}=G(U_n^{k+1})+F(U_n^k)-G(U_n^k).
+dT=T/N;
+ndof=numel(u0);
+ends=nan(ndof,Kmax);
+times=nan(Kmax,1);
+parts.initial=NaN;
+parts.fineCum=nan(Kmax,1);
+parts.corrCum=nan(Kmax,1);
+failedK=NaN;
+failMessage='';
+start=tic;
+
+% Initial sequential coarse solution; fail fast if this solve fails.
+coarseStart=tic;
+Uold=zeros(N+1,ndof);
+Uold(1,:)=u0(:).';
+Gold=zeros(N,ndof);
+for n=1:N
+y=implicitBE(Uold(n,:).',A,r,dT,gSolver,nonlin);
+Uold(n+1,:)=y.';
+Gold(n,:)=y.';
+end
+parts.initial=toc(coarseStart);
+
+cumFine=0;
+cumCorr=0;
+for k=1:Kmax
+try
+fineOld=zeros(N,ndof);
+tf=tic;
+if useParallel
+parfor n=1:N
+yy=fineRK4(Uold(n,:).',A,r,dT,M);
+fineOld(n,:)=yy.';
+end
+else
+for n=1:N
+yy=fineRK4(Uold(n,:).',A,r,dT,M);
+fineOld(n,:)=yy.';
+end
+end
+cumFine=cumFine+toc(tf);
+
+tc=tic;
+Unew=zeros(N+1,ndof);
+Unew(1,:)=u0(:).';
+GnewSaved=zeros(N,ndof);
+for n=1:N
+gNew=implicitBE(Unew(n,:).',A,r,dT,gSolver,nonlin);
+Unew(n+1,:)=(gNew+fineOld(n,:).'-Gold(n,:).').';
+GnewSaved(n,:)=gNew.';
+if any(~isfinite(Unew(n+1,:)))
+error('Nonfinite Parareal correction at K=%d,n=%d.',k,n);
+end
+end
+cumCorr=cumCorr+toc(tc);
+Uold=Unew;
+Gold=GnewSaved;
+
+ends(:,k)=Uold(end,:).';
+times(k)=toc(start);
+parts.fineCum(k)=cumFine;
+parts.corrCum(k)=cumCorr;
+catch ME
+failedK=k;
+failMessage=ME.message;
+break
+end
+
+end
+end
+
+function [solver,tLU]=prepareBE(A,I,dt)
+B=I-dt*A;
+start=tic;
+[Lfac,Ufac,Pperm,Qperm]=lu(B);
+tLU=toc(start);
+solver=struct('B',B,'L',Lfac,'U',Ufac,'P',Pperm,'Q',Qperm);
+end
+
+function x=solveBE(solver,rhs)
+% Reuse numeric sparse LU factors:
+%     P*B*Q = L*U,  so B*x=rhs.
+% Split the triangular solves onto separate lines.  Each backslash below
+% is MATLAB's left-division operator, NOT parenthesis indexing.
+w=solver.P*rhs;
+w=solver.L\w;
+w=solver.U\w;
+x=solver.Q*w;
+
+% Fail immediately on invalid solves rather than treating them
+% as unqualified numerical solutions.
+if any(~isfinite(x))
+error('Nonfinite sparse-LU solution.');
+end
+
+end
+
+function y=implicitBE(v,A,r,dt,solver,nl)
+% Full implicit nonlinear BE:
+%        y - v - dt*(A*y+r*y.*(1-y)) = 0
+% First try safeguarded, backtracked Picard with cached diffusion LU.
+% If it stalls, perform damped Newton on the SAME nonlinear equation.
+% Newton Jacobian factorization occurs INSIDE method time measurements.
+v=v(:);
+nd=numel(v);
+y=v; % robust initial guess; avoids unstable explicit predictor at large dt
+res=implicitResidual(y,v,A,r,dt);
+normR=norm(res,inf);
+if normR<=nl.tol,return;end
+
+% Damped Picard phase.
+for iteration=1:nl.picardMax
+z=solveBE(solver,v+dt*r*y.*(1-y));
+if any(~isfinite(z)),break;end
+dy=z-y;
+accepted=false;
+step=1;
+for line=1:nl.maxBacktrack
+yt=y+step*dy;
+if all(isfinite(yt))
+rt=implicitResidual(yt,v,A,r,dt);
+newNorm=norm(rt,inf);
+if isfinite(newNorm) && ...
+(newNorm<=nl.tol || ...
+newNorm <= (1-nl.minDecrease*step)*normR)
+y=yt;normR=newNorm;accepted=true;break;
+end
+end
+step=0.5*step;
+end
+if normR<=nl.tol,return;end
+if ~accepted,break;end
+end
+
+% Damped Newton fallback. This does not change the BE discretization.
+for iteration=1:nl.newtonMax
+res=implicitResidual(y,v,A,r,dt);
+normR=norm(res,inf);
+if normR<=nl.tol,return;end
+jac=solver.B - dt*r*spdiags(1-2*y,0,nd,nd);
+dy=-(jac\res); % Newton factorization is timed, not precomputed.
+if any(~isfinite(dy)),break;end
+accepted=false;step=1;
+for line=1:nl.maxBacktrack
+yt=y+step*dy;
+if all(isfinite(yt))
+rt=implicitResidual(yt,v,A,r,dt);
+newNorm=norm(rt,inf);
+if isfinite(newNorm) && ...
+(newNorm<=nl.tol || ...
+newNorm <= (1-nl.minDecrease*step)*normR)
+y=yt;normR=newNorm;accepted=true;break;
+end
+end
+step=0.5*step;
+end
+if normR<=nl.tol,return;end
+if ~accepted,break;end
+end
+error('BE nonlinear solve did not converge (dt=%.6g, residual=%.3e).', ...
+dt,normR);
+end
+
+function res=implicitResidual(y,v,A,r,dt)
+res=y-v-dt*(A*y+r*y.*(1-y));
+end
+
+function y=serialBE(u0,A,r,T,ns,solver,nl)
+dt=T/ns;
+y=u0;
+for n=1:ns
+y=implicitBE(y,A,r,dt,solver,nl);
+end
+end
+
+function y=rk4Step(y,A,r,dt)
+k1=A*y+r*y.*(1-y);
+y2=y+0.5*dt*k1;
+k2=A*y2+r*y2.*(1-y2);
+y3=y+0.5*dt*k2;
+k3=A*y3+r*y3.*(1-y3);
+y4=y+dt*k3;
+k4=A*y4+r*y4.*(1-y4);
+y=y+(dt/6)*(k1+2*k2+2*k3+k4);
+end
+
+function y=fineRK4(v,A,r,coarseDt,M)
+dt=coarseDt/M;
+y=v(:);
+for m=1:M
+y=rk4Step(y,A,r,dt);
+end
+if any(~isfinite(y))
+error('RK4 fine solve produced nonfinite values.');
+end
+end
+
+function y=serialRK4(u0,A,r,T,ns)
+dt=T/ns;
+y=u0(:);
+for n=1:ns
+y=rk4Step(y,A,r,dt);
+end
+if any(~isfinite(y))
+error('Serial RK4 produced nonfinite values.');
+end
+end
+
+function folder=chooseWritableOutputDir()
+% Prefer a subfolder of pwd; fall back to OS temporary directory if the
+% working directory is read-only, synchronized, or has invalid path chars.
+% A REAL writetable test is run before the expensive simulation.
+candidateDirs={fullfile(pwd,'Reviewer4-Results'), ...
+fullfile(tempdir,'Reviewer4-Results')};
+errors=cell(0,1);
+
+for q=1:numel(candidateDirs)
+candidate=candidateDirs{q};
+try
+if exist(candidate,'dir')~=7
+[ok,msg]=mkdir(candidate);
+if ~ok,error('Cannot create directory: %s',msg);end
+end
+testPath=fullfile(candidate,'CSV-WRITE-TEST.csv');
+testTable=table(1,'VariableNames',{'Test'});
+writetable(testTable,testPath);
+assert(exist(testPath,'file')==2,'writetable did not create file.');
+delete(testPath);
+folder=candidate;
+return
+catch ME
+errors{end+1,1}=sprintf('%s: %s',candidate,ME.message); %#ok<AGROW>
+fprintf(2,'Output folder not writable: %s\n',errors{end});
+end
+end
+
+error('All output-directory writetable tests failed. Details:\n%s', ...
+strjoin(errors,sprintf('\n')));
+end
+
+function safeWriteTable(tbl,fileName)
+% Keep simulation running even if a single CSV cannot be saved.
+% Distinguish a CSV failure from an error in the numerical solver.
+% When CSV fails, attempt to preserve the MATLAB table in a .mat file.
+try
+writetable(tbl,fileName);
+fprintf('Saved CSV: %s\n',fileName);
+catch ME
+warning('CSV export failed: %s\nReason: %s',fileName,ME.message);
+matName=[fileName(1:end-4) '.mat'];
+try
+TableData=tbl; %#ok<NASGU>
+save(matName,'TableData');
+fprintf('Saved MATLAB fallback: %s\n',matName);
+catch ME2
+warning('MAT-file export also failed: %s',ME2.message);
+end
+end
+end
