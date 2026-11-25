@@ -1,0 +1,128 @@
+clear; clc;
+
+%% ============================================================
+%  Spatial convergence test for the exact-solution benchmark
+%
+%  PDE:
+%      u_t - d u_xx = alpha*u,    0 < x < 1
+%      u(0,t) = u(1,t) = 0
+%
+%  Initial condition:
+%      u(x,0) = sin(pi*x) + 0.5*sin(2*pi*x)
+%
+%  Exact PDE solution:
+%      u(x,t)
+%      = exp((alpha-d*pi^2)t) sin(pi*x)
+%        + 0.5 exp((alpha-4*d*pi^2)t) sin(2*pi*x)
+%
+%  We compare P_h u(t) with the exact semidiscrete solution U_h(t).
+%% ============================================================
+
+%% Parameters
+d     = 0.01;
+alpha = 1.0;
+T     = 1.0;
+
+% Number of spatial subintervals
+J_list = [20, 40, 80, 160, 320];
+
+% Fine time grid used only to approximate max_{0<=t<=T}
+Nt_sample = 10000;
+tgrid = linspace(0, T, Nt_sample + 1);
+
+numJ = length(J_list);
+
+Error = zeros(numJ,1);
+Order = NaN(numJ,1);
+t_max = zeros(numJ,1);
+
+%% Loop over spatial meshes
+for jj = 1:numJ
+
+    J = J_list(jj);
+    h = 1/J;
+
+    % Interior grid points
+    x = (1:J-1)' * h;
+
+    % Discrete sine modes
+    v1 = sin(pi*x);
+    v2 = sin(2*pi*x);
+
+    % ----------------------------------------------------------
+    % Eigenvalues of the discrete negative Laplacian
+    %
+    % mu_{m,h} = 4/h^2 * sin^2(m*pi*h/2)
+    % ----------------------------------------------------------
+    mu1_h = 4/h^2 * sin(pi*h/2)^2;
+    mu2_h = 4/h^2 * sin(pi*h)^2;
+
+    max_err = 0;
+    max_time = 0;
+
+    %% Compute maximum-in-time spatial error
+    for nt = 1:length(tgrid)
+
+        t = tgrid(nt);
+
+        % ------------------------------------------------------
+        % Exact PDE solution restricted to the spatial grid:
+        % P_h u(t)
+        % ------------------------------------------------------
+        Pu = exp((alpha - d*pi^2)*t) * v1 ...
+           + 0.5 * exp((alpha - 4*d*pi^2)*t) * v2;
+
+        % ------------------------------------------------------
+        % Exact solution of the spatially semidiscrete system
+        % ------------------------------------------------------
+        Uh = exp((alpha - d*mu1_h)*t) * v1 ...
+           + 0.5 * exp((alpha - d*mu2_h)*t) * v2;
+
+        % Error vector
+        e = Pu - Uh;
+
+        % Discrete L2 norm:
+        % ||e||_h = sqrt(h * sum_j |e_j|^2)
+        err_t = sqrt(h * sum(e.^2));
+
+        if err_t > max_err
+            max_err = err_t;
+            max_time = t;
+        end
+    end
+
+    Error(jj) = max_err;
+    t_max(jj) = max_time;
+
+    % Observed spatial convergence order
+    if jj >= 2
+        Order(jj) = log(Error(jj-1)/Error(jj)) / log(2);
+    end
+
+end
+
+%% Display results
+fprintf('\n');
+fprintf('============================================================\n');
+fprintf(' Spatial convergence test\n');
+fprintf('============================================================\n');
+fprintf('%8s %12s %18s %12s %12s\n', ...
+        'J', 'h', 'Error', 'Order', 't_max');
+fprintf('------------------------------------------------------------\n');
+
+for jj = 1:numJ
+
+    J = J_list(jj);
+    h = 1/J;
+
+    if jj == 1
+        fprintf('%8d %12.4e %18.10e %12s %12.6f\n', ...
+                J, h, Error(jj), '--', t_max(jj));
+    else
+        fprintf('%8d %12.4e %18.10e %12.6f %12.6f\n', ...
+                J, h, Error(jj), Order(jj), t_max(jj));
+    end
+
+end
+
+fprintf('============================================================\n');
