@@ -1,0 +1,522 @@
+clear;
+clc;
+close all;
+
+%% ============================================================
+%  Allen-Cahn Parareal error-decay plots
+%
+%  Equation:
+%      u_t = epsilon^2*u_xx + u - u^3,   0 < x < 1, 0 < t <= T
+%
+%  Boundary conditions:
+%      u(0,t) = u(1,t) = 0
+%
+%  Initial condition:
+%      u(x,0) = 0.8*sin(2*pi*x)
+%
+%  Output:
+%      Figure 1:
+%          fixed coarse solver = BE
+%          fine solver = BE, IM2, RK3, RK4
+%
+%      Figure 2:
+%          fixed fine solver = RK4
+%          coarse solver = BE, IM2, RK3, RK4
+%
+%  Error plotted:
+%      E^(k) = max_{0<=n<=N} ||U_n^(k) - U_ref(T_n)||_h
+%
+%% ============================================================
+
+
+%% ============================================================
+% PARAMETERS
+%% ============================================================
+
+% Physical parameters
+L = 1.0;
+T = 1.0;
+epsilon = 0.1;
+diffusionCoeff = epsilon^2;
+
+% Spatial mesh
+J = 40;
+h = L / J;
+x = linspace(0, L, J+1).';
+xInterior = x(2:end-1);
+ndof = J - 1;
+
+% Time parameters for the Parareal experiment
+N = 40;          % number of coarse intervals
+Mfine = 5;       % number of fine steps inside each coarse interval
+K = 4;           % compute k = 0,1,2,3,4
+
+% Reference RK4 parameters
+Mref = 400;      % RK4 substeps per coarse interval for reference
+
+% Newton solver parameters
+newtonTol = 1.0e-12;
+newtonMaxit = 50;
+
+%% ============================================================
+% NONLINEARITY AND INITIAL CONDITION
+%% ============================================================
+
+reaction = @(u) u - u.^3;
+reactionPrime = @(u) 1.0 - 3.0*u.^2;
+
+u0 = 0.8 * sin(2.0*pi*xInterior);
+
+%% ============================================================
+% SPATIAL SEMI-DISCRETIZATION
+%
+% U'(t) = A_h U(t) + F(U(t))
+%% ============================================================
+
+e = ones(ndof,1);
+A0 = spdiags([e -2.0*e e],[-1 0 1],ndof,ndof);
+Ah = (diffusionCoeff / h^2) * A0;
+
+%% ============================================================
+% PRINT BASIC INFO
+%% ============================================================
+
+rhoAh = max(abs(eig(full(Ah))));
+DeltaT = T / N;
+deltat = DeltaT / Mfine;
+
+fprintf('============================================================\n');
+fprintf('Allen-Cahn Parareal error-decay experiment\n');
+fprintf('============================================================\n');
+fprintf('J                  = %d\n', J);
+fprintf('h                  = %.6e\n', h);
+fprintf('N                  = %d\n', N);
+fprintf('DeltaT             = %.6e\n', DeltaT);
+fprintf('Mfine              = %d\n', Mfine);
+fprintf('deltat             = %.6e\n', deltat);
+fprintf('K                  = %d\n', K);
+fprintf('rho(-Ah)           = %.6e\n', rhoAh);
+fprintf('DeltaT*rho(-Ah)    = %.6e\n', DeltaT*rhoAh);
+fprintf('deltat*rho(-Ah)    = %.6e\n', deltat*rhoAh);
+fprintf('============================================================\n\n');
+
+%% ============================================================
+% HIGH-ACCURACY REFERENCE SOLUTION
+%% ============================================================
+
+fprintf('Computing high-accuracy reference solution ...\n');
+
+Tnodes = linspace(0,T,N+1).';
+Uref = serialRK4ReferenceAtNodes(Tnodes,u0,Ah,reaction,Mref);
+
+fprintf('Reference solution finished.\n\n');
+
+%% ============================================================
+% FIGURE 1:
+% FIXED COARSE = BE, DIFFERENT FINE SOLVERS
+%% ============================================================
+
+fineMethods = {'BE','IM2','RK3','RK4'};
+numFine = numel(fineMethods);
+
+errFine = zeros(K+1,numFine);
+
+for iFine = 1:numFine
+
+    fineMethod = fineMethods{iFine};
+
+    fprintf('Figure 1: coarse = BE, fine = %s\n', methodFullName(fineMethod));
+
+    Uhist = runPararealGeneral( ...
+        u0, ...
+        Ah, ...
+        reaction, ...
+        reactionPrime, ...
+        T, ...
+        N, ...
+        Mfine, ...
+        K, ...
+        'BE', ...
+        fineMethod, ...
+        newtonTol, ...
+        newtonMaxit);
+
+    for k = 0:K
+        Uk = Uhist{k+1};
+        dk = rowGridNorm(Uk - Uref, h);
+        errFine(k+1,iFine) = max(dk);
+    end
+
+    fprintf('\n');
+
+end
+
+%% ============================================================
+% FIGURE 2:
+% FIXED FINE = RK4, DIFFERENT COARSE SOLVERS
+%% ============================================================
+
+coarseMethods = {'BE','IM2','RK3','RK4'};
+numCoarse = numel(coarseMethods);
+
+errCoarse = zeros(K+1,numCoarse);
+
+for iCoarse = 1:numCoarse
+
+    coarseMethod = coarseMethods{iCoarse};
+
+    fprintf('Figure 2: coarse = %s, fine = RK4\n', methodFullName(coarseMethod));
+
+    Uhist = runPararealGeneral( ...
+        u0, ...
+        Ah, ...
+        reaction, ...
+        reactionPrime, ...
+        T, ...
+        N, ...
+        Mfine, ...
+        K, ...
+        coarseMethod, ...
+        'RK4', ...
+        newtonTol, ...
+        newtonMaxit);
+
+    for k = 0:K
+        Uk = Uhist{k+1};
+        dk = rowGridNorm(Uk - Uref, h);
+        errCoarse(k+1,iCoarse) = max(dk);
+    end
+
+    fprintf('\n');
+
+end
+
+%% ============================================================
+% PLOT FIGURE 1
+%% ============================================================
+
+kvec = 0:K;
+
+figure(1);
+
+semilogy(kvec, errFine(:,1), '-o', 'LineWidth', 1.5, 'MarkerSize', 7); hold on;
+semilogy(kvec, errFine(:,2), '-s', 'LineWidth', 1.5, 'MarkerSize', 7);
+semilogy(kvec, errFine(:,3), '-^', 'LineWidth', 1.5, 'MarkerSize', 7);
+semilogy(kvec, errFine(:,4), '-d', 'LineWidth', 1.5, 'MarkerSize', 7);
+
+grid on;
+box on;
+
+xlabel('Parareal iteration k','FontSize',12);
+ylabel('Maximum-in-time error','FontSize',12);
+
+title('Effect of fine propagator order (coarse = BE)','FontSize',12);
+
+legend( ...
+    'Fine BE (q=1)', ...
+    'Fine IM2 (q=2)', ...
+    'Fine RK3 (q=3)', ...
+    'Fine RK4 (q=4)', ...
+    'Location','southwest');
+
+set(gca,'XTick',kvec,'FontSize',11);
+
+%% ============================================================
+% PLOT FIGURE 2
+%% ============================================================
+
+figure(2);
+
+semilogy(kvec, errCoarse(:,1), '-o', 'LineWidth', 1.5, 'MarkerSize', 7); hold on;
+semilogy(kvec, errCoarse(:,2), '-s', 'LineWidth', 1.5, 'MarkerSize', 7);
+semilogy(kvec, errCoarse(:,3), '-^', 'LineWidth', 1.5, 'MarkerSize', 7);
+semilogy(kvec, errCoarse(:,4), '-d', 'LineWidth', 1.5, 'MarkerSize', 7);
+
+grid on;
+box on;
+
+xlabel('Parareal iteration k','FontSize',12);
+ylabel('Maximum-in-time error','FontSize',12);
+
+title('Effect of coarse propagator order (fine = RK4)','FontSize',12);
+
+legend( ...
+    'Coarse BE (p=1)', ...
+    'Coarse IM2 (p=2)', ...
+    'Coarse RK3 (p=3)', ...
+    'Coarse RK4 (p=4)', ...
+    'Location','southwest');
+
+set(gca,'XTick',kvec,'FontSize',11);
+
+%% ============================================================
+% OPTIONAL: PRINT ERROR TABLES
+%% ============================================================
+
+fprintf('============================================================\n');
+fprintf('Figure 1 errors: fixed coarse = BE\n');
+fprintf('============================================================\n');
+fprintf('%6s | %16s | %16s | %16s | %16s\n', ...
+    'k','Fine BE','Fine IM2','Fine RK3','Fine RK4');
+fprintf('--------------------------------------------------------------------------\n');
+for k = 0:K
+    fprintf('%6d | %16.8e | %16.8e | %16.8e | %16.8e\n', ...
+        k, errFine(k+1,1), errFine(k+1,2), errFine(k+1,3), errFine(k+1,4));
+end
+fprintf('\n');
+
+fprintf('============================================================\n');
+fprintf('Figure 2 errors: fixed fine = RK4\n');
+fprintf('============================================================\n');
+fprintf('%6s | %16s | %16s | %16s | %16s\n', ...
+    'k','Coarse BE','Coarse IM2','Coarse RK3','Coarse RK4');
+fprintf('--------------------------------------------------------------------------\n');
+for k = 0:K
+    fprintf('%6d | %16.8e | %16.8e | %16.8e | %16.8e\n', ...
+        k, errCoarse(k+1,1), errCoarse(k+1,2), errCoarse(k+1,3), errCoarse(k+1,4));
+end
+fprintf('\n');
+
+%% ============================================================
+% LOCAL FUNCTIONS
+%% ============================================================
+
+function name = methodFullName(method)
+
+    method = upper(strtrim(method));
+
+    switch method
+        case 'BE'
+            name = 'Backward Euler';
+        case 'IM2'
+            name = 'Implicit Midpoint';
+        case 'RK3'
+            name = 'Classical RK3';
+        case 'RK4'
+            name = 'Classical RK4';
+        otherwise
+            name = method;
+    end
+
+end
+
+function U = serialRK4ReferenceAtNodes(Tnodes,u0,A,f,Mref)
+% High-accuracy serial RK4 reference solution.
+% Each output interval [T_n,T_{n+1}] is divided into Mref RK4 steps.
+
+    Tnodes = Tnodes(:);
+    nOut = numel(Tnodes);
+    ndof = numel(u0);
+
+    U = zeros(nOut,ndof);
+    U(1,:) = u0(:).';
+
+    y = u0(:);
+
+    for n = 1:nOut-1
+
+        dt = (Tnodes(n+1)-Tnodes(n)) / Mref;
+
+        for m = 1:Mref
+            y = rk4Step(y,A,f,dt);
+        end
+
+        U(n+1,:) = y.';
+    end
+
+end
+
+function Uhist = runPararealGeneral( ...
+    u0,A,f,fp,T,N,Mfine,K,coarseMethod,fineMethod,tol,maxit)
+% General Parareal iteration:
+%
+% U_{n+1}^{k+1} = G(U_n^{k+1}) + F(U_n^k) - G(U_n^k)
+
+    ndof = numel(u0);
+    DeltaT = T / N;
+
+    Uhist = cell(K+1,1);
+
+    %% Initial coarse prediction: k = 0
+    U0 = zeros(N+1,ndof);
+    U0(1,:) = u0(:).';
+
+    for n = 1:N
+        v = U0(n,:).';
+        y = oneStepMethod(v,A,f,fp,DeltaT,coarseMethod,tol,maxit);
+        U0(n+1,:) = y.';
+    end
+
+    Uhist{1} = U0;
+
+    %% Parareal iterations
+    for k = 0:K-1
+
+        fprintf('   Parareal iteration %d / %d\n', k+1, K);
+
+        Uold = Uhist{k+1};
+
+        % Fine propagation from previous iterate
+        fineOld = zeros(N,ndof);
+
+        for n = 1:N
+            v = Uold(n,:).';
+            fineOld(n,:) = propagateOverInterval( ...
+                v,A,f,fp,DeltaT,Mfine,fineMethod,tol,maxit).';
+        end
+
+        % Sequential correction
+        Unew = zeros(N+1,ndof);
+        Unew(1,:) = u0(:).';
+
+        for n = 1:N
+
+            vNew = Unew(n,:).';
+            vOld = Uold(n,:).';
+
+            Gnew = oneStepMethod(vNew,A,f,fp,DeltaT,coarseMethod,tol,maxit);
+            Gold = oneStepMethod(vOld,A,f,fp,DeltaT,coarseMethod,tol,maxit);
+
+            Unew(n+1,:) = (Gnew + fineOld(n,:).' - Gold).';
+        end
+
+        Uhist{k+2} = Unew;
+    end
+
+end
+
+function y = propagateOverInterval(v,A,f,fp,DeltaT,M,method,tol,maxit)
+% Apply M steps of the selected method over one coarse interval.
+
+    dt = DeltaT / M;
+    y = v;
+
+    for m = 1:M
+        y = oneStepMethod(y,A,f,fp,dt,method,tol,maxit);
+    end
+
+end
+
+function y = oneStepMethod(v,A,f,fp,dt,method,tol,maxit)
+
+    method = upper(strtrim(method));
+
+    switch method
+        case 'BE'
+            y = backwardEulerStep(v,A,f,fp,dt,tol,maxit);
+        case 'IM2'
+            y = implicitMidpointStep(v,A,f,fp,dt,tol,maxit);
+        case 'RK3'
+            y = rk3Step(v,A,f,dt);
+        case 'RK4'
+            y = rk4Step(v,A,f,dt);
+        otherwise
+            error('Unknown time-integration method.');
+    end
+
+end
+
+function y = backwardEulerStep(v,A,f,fp,dt,tol,maxit)
+% Backward Euler:
+%   y = v + dt*(A*y + f(y))
+
+    y = v;
+    n = numel(v);
+    I = speye(n);
+
+    for it = 1:maxit
+
+        residual = y - v - dt*(A*y + f(y));
+
+        if norm(residual,inf) <= tol*(1.0 + norm(y,inf))
+            return;
+        end
+
+        JNewton = I - dt*(A + spdiags(fp(y),0,n,n));
+
+        delta = -JNewton \ residual;
+        y = y + delta;
+
+        if norm(delta,inf) <= tol*(1.0 + norm(y,inf))
+            return;
+        end
+
+    end
+
+    warning('Backward Euler Newton iteration reached maxit = %d.', maxit);
+
+end
+
+function y = implicitMidpointStep(v,A,f,fp,dt,tol,maxit)
+% Implicit midpoint:
+%   y = v + dt*( A*((v+y)/2) + f((v+y)/2) )
+
+    y = v;
+    n = numel(v);
+    I = speye(n);
+
+    for it = 1:maxit
+
+        ymid = 0.5*(v + y);
+
+        residual = y - v - dt*(A*ymid + f(ymid));
+
+        if norm(residual,inf) <= tol*(1.0 + norm(y,inf))
+            return;
+        end
+
+        JNewton = I - 0.5*dt*(A + spdiags(fp(ymid),0,n,n));
+
+        delta = -JNewton \ residual;
+        y = y + delta;
+
+        if norm(delta,inf) <= tol*(1.0 + norm(y,inf))
+            return;
+        end
+
+    end
+
+    warning('Implicit midpoint Newton iteration reached maxit = %d.', maxit);
+
+end
+
+function ynew = rk3Step(y,A,f,dt)
+% Classical third-order Kutta Runge-Kutta method.
+
+    k1 = A*y + f(y);
+
+    y2 = y + 0.5*dt*k1;
+    k2 = A*y2 + f(y2);
+
+    y3 = y - dt*k1 + 2.0*dt*k2;
+    k3 = A*y3 + f(y3);
+
+    ynew = y + (dt/6.0)*(k1 + 4.0*k2 + k3);
+
+end
+
+function ynew = rk4Step(y,A,f,dt)
+% Classical fourth-order Runge-Kutta method.
+
+    k1 = A*y + f(y);
+
+    y2 = y + 0.5*dt*k1;
+    k2 = A*y2 + f(y2);
+
+    y3 = y + 0.5*dt*k2;
+    k3 = A*y3 + f(y3);
+
+    y4 = y + dt*k3;
+    k4 = A*y4 + f(y4);
+
+    ynew = y + (dt/6.0)*(k1 + 2.0*k2 + 2.0*k3 + k4);
+
+end
+
+function nr = rowGridNorm(X,h)
+% Row-wise discrete L2 norm:
+%   ||v||_h = sqrt(h * sum_j |v_j|^2)
+
+    nr = sqrt(h * sum(abs(X).^2,2));
+
+end
