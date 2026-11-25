@@ -1,0 +1,638 @@
+function FisherKPP2D_Reviewer6_Minimal()
+% REVIEWER 6 AND 19: minimal supplemental performance experiments.
+% Run: FisherKPP2D_Reviewer6_Minimal
+% Requires MATLAB + Parallel Computing Toolbox.
+%
+% Numerical kernels below are retained from p_4_3_2D_all.m:
+%   BE with Picard iteration and cached sparse LU; classical RK4;
+%   cached old G evaluations; parfor fine phase; sequential correction.
+%
+% Default: 25 complete timed Parareal runs (5 repeats per configuration).
+% A: K=1,3 (fresh calibration + interval-cost diagnostics).
+% B: K=1,2,3 (local calibration and held-out validation).
+% Set freshCalibrationA=false for the previously proposed 20-run plan.
+% In that mode, cross-configuration transfer uses HISTORICAL Table 9 eta
+% and is only interpretable if the environment and implementation match.
+%
+% Historical Table 9 is reconstructed separately from rounded paper data.
+% No historical wall-clock times are mixed into fresh timing averages.
+% No accuracy-matched serial screening or expensive reference refinement.
+% ErrorToMatched is vs matched serial RK4, NOT an independent reference.
+%
+% Output folder is timestamped. Each completed configuration is saved.
+% Timings exclude LU setup, pool creation/deletion, warmups, and output.
+% Fine task timers exclude dispatch; fine phase includes dispatch/sync.
+% Model discrepancy is NOT a direct communication-time measurement.
+
+%% SETTINGS
+L=1; T=5; D=1e-2; r=1; alpha=100;
+J=160; P=32; nRepeats=5;
+fpTol=1e-10; fpMaxit=100; usePredictor=true;
+freshCalibrationA=true; % false -> 20 runs, historical transfer only
+makePlots=true;
+outDir=fullfile(pwd,['Reviewer6_19_' datestr(now,'yyyymmdd_HHMMSS')]);
+if ~exist(outDir,'dir'), mkdir(outDir); end
+assert(nRepeats>=2 && P==32 && J==160, ...
+    'Paper comparison configured for J=160, P=32, repeats>=2.');
+fprintf('Results folder: %s\n',outDir);
+
+% Reconstruct published Table 9 immediately; no numerical solve needed.
+H=historicalTable9();
+writetable(H,fullfile(outDir,'01_Table9_Historical_Augmented.csv'));
+if makePlots
+    try
+        plotHistorical(H,outDir);
+    catch ME
+        warning('Historical figure export failed: %s',ME.message);
+    end
+end
+
+h=L/J;
+x=(1:J-1)'*h;
+[Xint,Yint]=meshgrid(x,x);
+u0=exp(-alpha*((Xint-L/2).^2+(Yint-L/2).^2)); u0=u0(:);
+Ah=buildDiffusionMatrix2D(J,L,D);
+Ih=speye(numel(u0));
+rho=8*D/h^2*cos(pi/(2*J))^2;
+cases={'A','B'};
+Nlist=[128 64]; Mlist=[500 1000];
+if freshCalibrationA, KA=[1 3]; else, KA=3; end
+Klists={KA,[1 2 3]};
+fprintf('Complete timed Parareal runs: %d\n', ...
+    nRepeats*(numel(KA)+numel(Klists{2})));
+
+oldThreads=maxNumCompThreads;
+maxNumCompThreads(1);
+threadCleanup=onCleanup(@() maxNumCompThreads(oldThreads)); %#ok<NASGU>
+cleanupPoolIfOpen();
+poolCleanup=onCleanup(@cleanupPoolIfOpen); %#ok<NASGU>
+
+% Metadata (worker settings observed, not assumed).
+metadata=struct('MATLABVersion',version,'Computer',computer, ...
+    'ClientThreads',maxNumCompThreads,'RequestedWorkers',P, ...
+    'Repeats',nRepeats,'J',J,'T',T,'D',D,'r',r,'alpha',alpha, ...
+    'PicardTolerance',fpTol,'PicardMaxIterations',fpMaxit, ...
+    'FreshCalibrationA',freshCalibrationA);
+save(fullfile(outDir,'Metadata.mat'),'metadata');
+fid=fopen(fullfile(outDir,'README_results.txt'),'w');
+if fid>=0
+    fprintf(fid,['All fresh runs: same J,T,D,r,alpha, BE/RK4 kernels, ' ...
+        'and client thread limit of 1.\n' ...
+        'Pool: local process workers; actual count checked.\n' ...
+        'LU setup, pool startup/shutdown, warmup, analysis and file writes excluded.\n' ...
+        '01 and Figure6a use rounded historical Table 9 ONLY.\n' ...
+        '02--08 use fresh data; transfer source is explicitly labelled.\n' ...
+        'ErrorToMatched is NOT error against the independent reference.\n' ...
+        'Eta is an empirical signed aggregate model discrepancy, not communication time.\n' ...
+        'Fine kernel times omit dispatch/collection; fine phase wall time includes these.\n' ...
+        'CV statistics are computed within each sweep, then averaged over repeats.\n']);
+    fclose(fid);
+end
+
+baseNames={'CaseID','J','N','M','Repeat','SerialFine_s','CoarseSweep_s','LUSetup_s'};
+runNames={'CaseID','J','N','M','P','K','Repeat','Total_s', ...
+    'InitialCoarse_s','FinePhase_s','Correction_s','Other_s', ...
+    'ErrorToMatched','MeanPicardIterations','MaxPicardIterations','MaxBEResidual'};
+intervalNames={'CaseID','J','N','M','P','TotalK','Repeat','Iteration', ...
+    'Interval','G_s','F_s','CorrectionAlgebra_s'};
+statNames={'CaseID','J','N','M','P','TotalK','Repeat','Iteration', ...
+    'MeanG_s','StdG_s','CVG_percent','MeanF_s','StdF_s','CVF_percent', ...
+    'GCostRatio','FCostRatio','MaxG_s','MaxF_s'};
+modelNames={'CaseID','J','N','M','P','K','SerialMean_s','SerialSD_s', ...
+    'CoarseMean_s','CoarseSD_s','CF_s','CG_s','Tpred_s','Tpar_s','TparSD_s', ...
+    'SpeedupPred','SpeedupMeasured','ErrorToMatchedMax','GCalls','FCalls'};
+
+baseRaw=zeros(0,numel(baseNames));
+runRaw=zeros(0,numel(runNames));
+intervalRaw=zeros(0,numel(intervalNames));
+statRaw=zeros(0,numel(statNames));
+modelRaw=zeros(0,numel(modelNames));
+
+for ic=1:2
+    N=Nlist(ic); M=Mlist(ic); Klist=Klists{ic};
+    DeltaT=T/N; dt=DeltaT/M;
+    assert(P<=N && dt*rho<2.785, 'Diffusion RK4 CFL check failed.');
+    fprintf('\n==== Case %s: J=%d N=%d M=%d P=%d K=%s ====\n', ...
+        cases{ic},J,N,M,P,mat2str(Klist));
+    cleanupPoolIfOpen();
+
+    % Same coarse matrix and numerical method as original script.
+    tLU=tic;
+    BEFixedSolver=decomposition(Ih-DeltaT*Ah,'lu');
+    LUSetupTime=toc(tLU);
+
+    % Independent serial baseline for each temporal decomposition.
+    % Preserve the original full-trajectory warmup and baseline timings.
+    warm=serialFineRK4FinalFisher(u0,Ah,r,T,N,M); %#ok<NASGU>
+    warm=sequentialCoarseSweepFisher( ...
+        u0,Ah,r,T,N,BEFixedSolver,fpTol,fpMaxit,usePredictor); %#ok<NASGU>
+    clear warm
+    serialTimes=zeros(nRepeats,1); coarseTimes=zeros(nRepeats,1);
+    for rep=1:nRepeats
+        ts=tic;
+        uMatched=serialFineRK4FinalFisher(u0,Ah,r,T,N,M);
+        serialTimes(rep)=toc(ts);
+        tg=tic;
+        uCoarse=sequentialCoarseSweepFisher( ...
+            u0,Ah,r,T,N,BEFixedSolver,fpTol,fpMaxit,usePredictor); %#ok<NASGU>
+        coarseTimes(rep)=toc(tg);
+        baseRaw(end+1,:)=[ic,J,N,M,rep,serialTimes(rep), ...
+            coarseTimes(rep),LUSetupTime]; %#ok<AGROW>
+        fprintf('  Baseline %d/%d: F=%.6f s, G=%.6f s\n', ...
+            rep,nRepeats,serialTimes(rep),coarseTimes(rep));
+    end
+    CF=mean(serialTimes)/N; CG=mean(coarseTimes)/N;
+    fprintf('  CF=%.9f s/slice, CG=%.9f s/slice\n',CF,CG);
+    writetable(array2table(baseRaw,'VariableNames',baseNames), ...
+        fullfile(outDir,'02_Serial_Baseline_Raw.csv'));
+
+    pool=parpool('local',P);
+    assert(pool.NumWorkers==P,'Incorrect worker count.');
+    % Warm up full fine tasks, then the original shortened Parareal run.
+    workerWarm=zeros(P,1);
+    parfor iw=1:P
+        vWarm=finePropRK4Fisher(u0,Ah,r,DeltaT,M);
+        workerWarm(iw)=vWarm(1);
+    end
+    assert(all(isfinite(workerWarm)),'Worker warmup failed.');
+    Nwarm=min(N,P); Twarm=Nwarm*DeltaT;
+    [uw,tw]=runPararealBE_RK4_ParallelFisherFixedPoint( ...
+        u0,Ah,r,BEFixedSolver,Twarm,Nwarm,M,1,fpTol,fpMaxit,usePredictor);
+    assert(tw.failedCoarseSolves==0,'Parareal warmup failed.');
+    clear uw tw
+
+    for K=Klist
+        total=zeros(nRepeats,1); err=zeros(nRepeats,1);
+        for rep=1:nRepeats
+            tt=tic;
+            [Upar,timing]=runPararealBE_RK4_ParallelFisherFixedPoint( ...
+                u0,Ah,r,BEFixedSolver,T,N,M,K,fpTol,fpMaxit,usePredictor);
+            total(rep)=toc(tt);
+            assert(timing.failedCoarseSolves==0, ...
+                'BE failed: case %s, K=%d, repeat=%d.',cases{ic},K,rep);
+            err(rep)=gridNorm2D(Upar(end,:).'-uMatched,h);
+            assert(isfinite(err(rep)),'Nonfinite final error.');
+            clear Upar
+            tf=sum(timing.fine); tc=sum(timing.correction);
+            runRaw(end+1,:)=[ic,J,N,M,P,K,rep,total(rep), ...
+                timing.initialCoarse,tf,tc,total(rep)-timing.initialCoarse-tf-tc, ...
+                err(rep),timing.meanFPIterations,timing.maxFPIterations, ...
+                timing.maxBEResidual]; %#ok<AGROW>
+            % All statistics and data export are OUTSIDE the outer timer.
+            for kk=0:K
+                if kk==0
+                    g=timing.coarseInitialPerInterval(:);
+                    f=nan(N,1); a=nan(N,1);
+                else
+                    g=timing.coarseCorrectionPerInterval(kk,:).';
+                    f=timing.finePerInterval(kk,:).';
+                    a=timing.correctionAlgebraPerInterval(kk,:).';
+                end
+                assert(all(isfinite(g)&g>0),'Invalid coarse task timer.');
+                if kk>0
+                    assert(all(isfinite(f)&f>0),'Invalid fine task timer.');
+                end
+                keys=[ic,J,N,M,P,K,rep,kk];
+                intervalRaw=[intervalRaw;repmat(keys,N,1),(1:N)',g,f,a]; %#ok<AGROW>
+                mg=mean(g); sg=std(g); mf=mean(f); sf=std(f);
+                statRaw(end+1,:)=[keys,mg,sg,100*sg/mg, ...
+                    mf,sf,100*sf/mf,mg/CG,mf/CF,max(g),max(f)]; %#ok<AGROW>
+            end
+            fprintf('  Case %s K=%d repeat %d/%d: %.6f s; E_matched=%.4e\n', ...
+                cases{ic},K,rep,nRepeats,total(rep),err(rep));
+            % Save raw data after each completed timed run.
+            save(fullfile(outDir,'Checkpoint.mat'),'metadata','baseRaw','runRaw', ...
+                'intervalRaw','statRaw','modelRaw','baseNames','runNames', ...
+                'intervalNames','statNames','modelNames','H');
+        end
+
+        tp=(K+1)*N*CG+K*ceil(N/P)*CF;
+        tm=mean(total);
+        modelRaw(end+1,:)=[ic,J,N,M,P,K,mean(serialTimes),std(serialTimes), ...
+            mean(coarseTimes),std(coarseTimes),CF,CG,tp,tm,std(total), ...
+            mean(serialTimes)/tp,mean(serialTimes)/tm,max(err), ...
+            (K+1)*N,K*N]; %#ok<AGROW>
+        % Persist CSVs after each completed (case,K).
+        writetable(array2table(runRaw,'VariableNames',runNames), ...
+            fullfile(outDir,'03_Parareal_Raw_Timings.csv'));
+        writetable(array2table(intervalRaw,'VariableNames',intervalNames), ...
+            fullfile(outDir,'04_Interval_Raw_Timings.csv'));
+        writetable(array2table(statRaw,'VariableNames',statNames), ...
+            fullfile(outDir,'05_Interval_PerRun_Statistics.csv'));
+        writetable(array2table(modelRaw,'VariableNames',modelNames), ...
+            fullfile(outDir,'06_Fresh_Model_Before_Calibration.csv'));
+        save(fullfile(outDir,'Checkpoint.mat'),'metadata','baseRaw','runRaw', ...
+            'intervalRaw','statRaw','modelRaw','baseNames','runNames', ...
+            'intervalNames','statNames','modelNames','H');
+    end
+    delete(pool);
+    clear BEFixedSolver
+end
+
+%% INTERVAL STATISTICS: use K=3 full runs, averaged over repeats.
+S=array2table(statRaw,'VariableNames',statNames);
+statsCols=statNames(9:end);
+summaryRaw=zeros(0,8+numel(statsCols));
+for ic=1:2
+    for kk=0:3
+        idx=S.CaseID==ic & S.TotalK==3 & S.Iteration==kk;
+        assert(nnz(idx)==nRepeats,'Incomplete interval statistics.');
+        q=S{idx,statsCols};
+        summaryRaw(end+1,:)=[ic,J,Nlist(ic),Mlist(ic),P,3,kk,nRepeats, ...
+            mean(q,1)]; %#ok<AGROW>
+    end
+end
+U=array2table(summaryRaw,'VariableNames', ...
+    [{'CaseID','J','N','M','P','TotalK','Iteration','Repeats'},statsCols]);
+writetable(U,fullfile(outDir,'07_Uniform_Cost_Summary.csv'));
+
+%% FRESH CALIBRATION AND CROSS-CONFIGURATION VALIDATION
+Q=array2table(modelRaw,'VariableNames',modelNames);
+Q.EtaObserved_s=(Q.Tpar_s-Q.Tpred_s)./Q.K;
+Q.EtaLocal_s=nan(height(Q),1);
+Q.Taug_s=nan(height(Q),1);
+Q.IsLocalCalibration=false(height(Q),1);
+for ic=1:2
+    idx=Q.CaseID==ic;
+    i1=idx & Q.K==1;
+    if nnz(i1)==1
+        eta=Q.Tpar_s(i1)-Q.Tpred_s(i1);
+        Q.EtaLocal_s(idx)=eta;
+        Q.Taug_s(idx)=Q.Tpred_s(idx)+Q.K(idx)*eta;
+        Q.IsLocalCalibration(i1)=true;
+    else
+        assert(ic==1 && ~freshCalibrationA,'Missing calibration.');
+    end
+end
+Q.ErrPred_percent=100*abs(Q.Tpred_s-Q.Tpar_s)./Q.Tpar_s;
+Q.ErrAug_percent=100*abs(Q.Taug_s-Q.Tpar_s)./Q.Tpar_s;
+Q.ResidualAug_s=Q.Taug_s-Q.Tpar_s;
+Q.SpeedupAug=Q.SerialMean_s./Q.Taug_s;
+% A calibration for parameter transfer. Never refit on case B.
+if freshCalibrationA
+    etaA=Q.EtaLocal_s(Q.CaseID==1 & Q.K==1);
+    transferSource='Fresh_A_k1_same_session';
+else
+    etaA=H.Eta_s(H.P==32 & H.K==1);
+    transferSource='Historical_Table9_A_k1_verify_environment';
+    warning(['Historical transfer only: verify matching hardware, ' ...
+        'implementation and timing policy before interpreting B results.']);
+end
+Q.EtaTransfer_s=repmat(etaA,height(Q),1);
+Q.TransferSource=repmat({transferSource},height(Q),1);
+Q.Ttransfer_s=Q.Tpred_s+Q.K*etaA;
+Q.ErrTransfer_percent=100*abs(Q.Ttransfer_s-Q.Tpar_s)./Q.Tpar_s;
+Q.ResidualTransfer_s=Q.Ttransfer_s-Q.Tpar_s;
+Q.SpeedupTransfer=Q.SerialMean_s./Q.Ttransfer_s;
+Q.IsTransferValidation=Q.CaseID==2;
+writetable(Q,fullfile(outDir,'08_Fresh_Calibrated_Model.csv'));
+V=Q(Q.CaseID==2,:);
+writetable(V,fullfile(outDir,'09_Cross_Configuration_Validation.csv'));
+
+fprintf('\n==== Interval-cost statistics (K=3 runs; average over repeats) ====\n');
+disp(U(:,{'CaseID','Iteration','MeanG_s','CVG_percent','MeanF_s', ...
+    'CVF_percent','GCostRatio','FCostRatio'}));
+fprintf('\n==== Fresh model results ====\n');
+disp(Q(:,{'CaseID','K','CF_s','CG_s','EtaLocal_s','Tpred_s','Tpar_s', ...
+    'Taug_s','ErrPred_percent','ErrAug_percent'}));
+fprintf('\n==== Case B transfer: %s, etaA=%.9f s ====\n',transferSource,etaA);
+disp(V(:,{'K','Tpar_s','Tpred_s','Taug_s','Ttransfer_s', ...
+    'ErrPred_percent','ErrAug_percent','ErrTransfer_percent'}));
+
+save(fullfile(outDir,'Reviewer6_19_Results.mat'),'H','U','Q','V','S', ...
+    'metadata','baseRaw','runRaw','intervalRaw','statRaw','modelRaw', ...
+    'baseNames','runNames','intervalNames','statNames','modelNames');
+if makePlots
+    try
+        plotFresh(Q,U,outDir);
+    catch ME
+        warning('Fresh figure export failed: %s',ME.message);
+    end
+end
+fprintf('\nDONE. All results saved to %s\n',outDir);
+end
+
+%% POSTPROCESSING OF EXISTING PAPER TABLE 9
+function H=historicalTable9()
+% These are the rounded numbers in the supplied manuscript, not new runs.
+P=[6;8;16;32;64];
+Tp=[10.242 18.379 26.517;8.596 15.088 21.580; ...
+    6.402 10.700 14.998;5.305 8.505 11.706;4.756 7.408 10.061];
+Tm=[12.6859 22.2917 32.2100;10.7696 18.7711 27.1265; ...
+    7.8932 13.6346 19.1857;7.2215 12.0360 16.9792; ...
+    6.9893 11.9302 16.4404];
+SD=[.2725 .0656 .4561;.3026 .2019 .5638;.1059 .2635 .2630; ...
+    .1697 .3166 .5339;.1650 .3789 .4856];
+Tser=35.1073;
+rows=zeros(15,15); q=0;
+for i=1:numel(P)
+    eta=Tm(i,1)-Tp(i,1);
+    for k=1:3
+        q=q+1;
+        ta=Tp(i,k)+k*eta;
+        rows(q,:)=[P(i),k,Tp(i,k),Tm(i,k),SD(i,k),eta, ...
+            (Tm(i,k)-Tp(i,k))/k,ta, ...
+            100*abs(Tp(i,k)-Tm(i,k))/Tm(i,k), ...
+            100*abs(ta-Tm(i,k))/Tm(i,k),ta-Tm(i,k), ...
+            Tser/Tp(i,k),Tser/ta,Tser/Tm(i,k),k==1];
+    end
+end
+H=array2table(rows,'VariableNames',{'P','K','Tpred_s','Tpar_s','TparSD_s', ...
+    'Eta_s','EtaObserved_s','Taug_s','ErrPred_percent','ErrAug_percent', ...
+    'ResidualAug_s','SpeedupPred','SpeedupAug','SpeedupMeasured','IsCalibration'});
+H.J=repmat(160,height(H),1); H.N=repmat(128,height(H),1);
+H.M=repmat(500,height(H),1); H.SerialMean_s=repmat(Tser,height(H),1);
+H.CF_reported_s=repmat(.274276,height(H),1);
+H.CG_reported_s=repmat(.016435,height(H),1);
+H.Source=repmat({'Historical_Table9_rounded'},height(H),1);
+end
+
+function plotHistorical(H,outDir)
+f=figure('Visible','off','Color','w','Position',[100 100 1050 350]);
+cleanup=onCleanup(@() close(f)); %#ok<NASGU>
+for k=1:3
+    ax=subplot(1,3,k,'Parent',f);
+    q=sortrows(H(H.K==k,:),'P');
+    plot(ax,q.P,q.SpeedupPred,'--o','LineWidth',1.2); hold(ax,'on');
+    plot(ax,q.P,q.SpeedupAug,'-s','LineWidth',1.4);
+    plot(ax,q.P,q.SpeedupMeasured,':^','LineWidth',1.5);
+    xlabel(ax,'Workers P'); ylabel(ax,'Speedup');
+    title(ax,sprintf('k = %d',k));
+    set(ax,'XTick',q.P); grid(ax,'on');
+    if k==1
+        legend(ax,{'Original','Augmented','Measured'},'Location','best');
+    end
+end
+savePlot(f,outDir,'Figure6a_Historical_Augmented');
+end
+
+function plotFresh(Q,U,outDir)
+f=figure('Visible','off','Color','w','Position',[100 100 720 430]);
+q=sortrows(Q(Q.CaseID==2,:),'K');
+ax=axes('Parent',f);
+plot(ax,q.K,q.Tpred_s,'--o','LineWidth',1.3); hold(ax,'on');
+plot(ax,q.K,q.Taug_s,'-s','LineWidth',1.3);
+plot(ax,q.K,q.Ttransfer_s,'-.d','LineWidth',1.3);
+errorbar(ax,q.K,q.Tpar_s,q.TparSD_s,':^','LineWidth',1.4);
+xlabel(ax,'Corrections k'); ylabel(ax,'Runtime (s)');
+title(ax,'Case B: N = 64, M = 1000, P = 32');
+set(ax,'XTick',q.K); grid(ax,'on');
+legend(ax,{'Original','Local calibration','Transferred calibration','Measured'}, ...
+    'Location','best');
+savePlot(f,outDir,'Figure_CaseB_Validation'); close(f);
+
+f=figure('Visible','off','Color','w','Position',[100 100 720 430]);
+ax=axes('Parent',f); q=U(U.CaseID==1,:);
+plot(ax,q.Iteration,q.CVG_percent,'-o','LineWidth',1.4); hold(ax,'on');
+plot(ax,q.Iteration,q.CVF_percent,'-s','LineWidth',1.4);
+xlabel(ax,'Correction sweep k (0 = initial coarse sweep)');
+ylabel(ax,'Coefficient of variation (%)');
+title(ax,'Case A: interval-wise cost variability');
+set(ax,'XTick',0:3); grid(ax,'on');
+legend(ax,{'Coarse','Fine'},'Location','best');
+savePlot(f,outDir,'Figure_Uniform_Cost'); close(f);
+end
+
+function savePlot(f,outDir,name)
+% PDF suitable for LaTeX; PNG for quick inspection.
+print(f,fullfile(outDir,[name '.pdf']),'-dpdf','-bestfit');
+print(f,fullfile(outDir,[name '.png']),'-dpng','-r300');
+end
+
+
+%% ORIGINAL NUMERICAL ROUTINES (retained from supplied file)
+function y = sequentialCoarseSweepFisher( ...
+    u0,A,r,T,N,BEFixedSolver,fpTol,fpMaxit,usePredictor)
+% Same N-slice BE solver as used in Parareal initial coarse prediction.
+    dt=T/N;
+    y=u0(:);
+    for nn=1:N
+        [y,info]=coarseBackwardEulerFisherFixedPoint( ...
+            y,A,r,dt,BEFixedSolver,fpTol,fpMaxit,usePredictor);
+        if ~info.converged
+            error('Coarse baseline BE did not converge at interval %d.',nn);
+        end
+    end
+end
+
+function cleanupPoolIfOpen()
+    try
+        pool=gcp('nocreate');
+        if ~isempty(pool)
+            delete(pool);
+        end
+    catch
+        % Preserve original exception, if any.
+    end
+end
+
+function A = buildDiffusionMatrix2D(J,L,D)
+    h = L/J;
+    n = J-1;
+    e = ones(n,1);
+    T1 = spdiags([e -2.0*e e],[-1 0 1],n,n);
+    I1 = speye(n);
+    Lap2D = kron(I1,T1) + kron(T1,I1);
+    A = (D/h^2) * Lap2D;
+end
+
+% -------------------------------------------------------------------------
+
+function y = serialFineRK4FinalFisher(u0,A,r,T,N,Mfine)
+    DeltaT = T/N;
+    y = u0(:);
+    for n = 1:N
+        y = finePropRK4Fisher(y,A,r,DeltaT,Mfine);
+    end
+end
+
+% -------------------------------------------------------------------------
+
+function [Upar,timing] = runPararealBE_RK4_ParallelFisherFixedPoint( ...
+    u0,A,r,BEFixedSolver,T,N,Mfine,K,fpTol,fpMaxit,usePredictor)
+
+    ndof = numel(u0);
+    DeltaT = T/N;
+
+    timing.initialCoarse = 0.0;
+    timing.fine          = zeros(K,1);
+    timing.correction    = zeros(K,1);
+    timing.coarseInitialPerInterval = zeros(1,N);
+    timing.coarseCorrectionPerInterval = zeros(K,N);
+    timing.correctionAlgebraPerInterval = zeros(K,N);
+    timing.finePerInterval = zeros(K,N);
+
+    allIterations = [];
+    maxResidual   = 0.0;
+    failedSolves  = 0;
+
+    % ---- initial coarse prediction ----
+    timerInitial = tic;
+    Uold = zeros(N+1,ndof);
+    Uold(1,:) = u0(:).';
+    GoldStored = zeros(N,ndof);
+
+    for n = 1:N
+        v = Uold(n,:).';
+        tG = tic;
+        [Gv,info] = coarseBackwardEulerFisherFixedPoint( ...
+            v,A,r,DeltaT,BEFixedSolver,fpTol,fpMaxit,usePredictor);
+        timing.coarseInitialPerInterval(n) = toc(tG);
+        allIterations(end+1,1) = info.iterations;
+        maxResidual = max(maxResidual,info.residual);
+        if ~info.converged
+            failedSolves = failedSolves + 1;
+        end
+        Uold(n+1,:)     = Gv.';
+        GoldStored(n,:) = Gv.';
+    end
+    timing.initialCoarse = toc(timerInitial);
+
+    % ---- Parareal iterations ----
+    for k = 1:K
+        fineOld = zeros(N,ndof);
+        fineTaskSeconds = zeros(N,1);  % sliced output from parfor
+
+        timerFine = tic;
+        parfor n = 1:N
+            vOld = Uold(n,:).';
+            taskClock = tic;
+            Fv = finePropRK4Fisher(vOld,A,r,DeltaT,Mfine);
+            fineTaskSeconds(n) = toc(taskClock);
+            fineOld(n,:) = Fv.';
+        end
+        timing.fine(k) = toc(timerFine);
+        timing.finePerInterval(k,:) = fineTaskSeconds(:).';
+
+        if any(~isfinite(fineOld(:)))
+            error('Parallel fine RK4 produced NaN or Inf.');
+        end
+
+        timerCorrection = tic;
+        Unew = zeros(N+1,ndof);
+        Unew(1,:) = u0(:).';
+        GnewStored = zeros(N,ndof);
+
+        for n = 1:N
+            vNew = Unew(n,:).';
+            tG = tic;
+            [Gnew,info] = coarseBackwardEulerFisherFixedPoint( ...
+                vNew,A,r,DeltaT,BEFixedSolver,fpTol,fpMaxit,usePredictor);
+            timing.coarseCorrectionPerInterval(k,n) = toc(tG);
+            allIterations(end+1,1) = info.iterations;
+            maxResidual = max(maxResidual,info.residual);
+            if ~info.converged
+                failedSolves = failedSolves + 1;
+            end
+            tVec = tic;
+            Unew(n+1,:) = (Gnew + fineOld(n,:).' - GoldStored(n,:).').';
+            if any(~isfinite(Unew(n+1,:)))
+                error('Parareal correction produced NaN or Inf.');
+            end
+            GnewStored(n,:) = Gnew.';
+            timing.correctionAlgebraPerInterval(k,n) = toc(tVec);
+        end
+        timing.correction(k) = toc(timerCorrection);
+
+        Uold        = Unew;
+        GoldStored  = GnewStored;
+    end
+
+    Upar = Uold;
+
+    if isempty(allIterations)
+        timing.meanFPIterations = 0;
+        timing.maxFPIterations  = 0;
+    else
+        timing.meanFPIterations = mean(allIterations);
+        timing.maxFPIterations  = max(allIterations);
+    end
+    timing.maxBEResidual     = maxResidual;
+    timing.failedCoarseSolves = failedSolves;
+end
+
+% -------------------------------------------------------------------------
+
+function [y,info] = coarseBackwardEulerFisherFixedPoint( ...
+    v,A,r,DeltaT,BEFixedSolver,tol,maxit,usePredictor)
+
+    v = v(:);
+    if any(~isfinite(v))
+        error('Backward Euler received NaN or Inf.');
+    end
+
+    if usePredictor
+        y = v + DeltaT*(A*v + r*v.*(1-v));
+    else
+        y = v;
+    end
+
+    if any(~isfinite(y))
+        y = v;
+    end
+
+    R        = y - v - DeltaT*(A*y + r*y.*(1-y));
+    residual = norm(R,inf);
+
+    if residual <= tol
+        info.converged  = true;
+        info.iterations = 0;
+        info.residual   = residual;
+        return;
+    end
+
+    converged = false;
+    for iter = 1:maxit
+        rhs  = v + DeltaT*r*y.*(1-y);
+        ynew = BEFixedSolver\rhs;
+
+        if any(~isfinite(ynew))
+            error('BE fixed-point iteration produced NaN or Inf.');
+        end
+
+        Rnew     = ynew - v - DeltaT*(A*ynew + r*ynew.*(1-ynew));
+        residual = norm(Rnew,inf);
+        y        = ynew;
+
+        if residual <= tol
+            converged = true;
+            break;
+        end
+    end
+
+    info.converged  = converged;
+    info.iterations = iter;
+    info.residual   = residual;
+end
+
+% -------------------------------------------------------------------------
+
+function y = finePropRK4Fisher(v,A,r,DeltaT,M)
+    dt = DeltaT/M;
+    y  = v(:);
+    for m = 1:M
+        y = rk4StepFisher(y,A,r,dt);
+        if any(~isfinite(y))
+            error('Fine RK4 produced NaN or Inf at step %d of %d.',m,M);
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+
+function ynew = rk4StepFisher(y,A,r,dt)
+    k1 = A*y        + r*y.*(1-y);
+    y2 = y + 0.5*dt*k1;
+    k2 = A*y2       + r*y2.*(1-y2);
+    y3 = y + 0.5*dt*k2;
+    k3 = A*y3       + r*y3.*(1-y3);
+    y4 = y + dt*k3;
+    k4 = A*y4       + r*y4.*(1-y4);
+    ynew = y + (dt/6.0)*(k1 + 2.0*k2 + 2.0*k3 + k4);
+end
+
+% -------------------------------------------------------------------------
+
+function nr = gridNorm2D(u,h)
+    nr = sqrt(h^2 * sum(abs(u).^2));
+end
