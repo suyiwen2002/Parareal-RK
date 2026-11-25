@@ -1,0 +1,423 @@
+clear; clc; close all;
+
+%% ============================================================
+%  Temporal convergence test + solution surface plots
+%
+%  PDE:
+%      u_t - d*u_xx = alpha*u
+%
+%  Coarse propagator : Backward Euler
+%  Fine propagator   : Classical RK4
+%
+%  Additional:
+%      Plot exact semidiscrete solution
+%      Plot Parareal numerical solution
+%
+%% ============================================================
+
+
+%% Problem parameters
+
+d     = 0.01;
+alpha = 1.0;
+T     = 1.0;
+
+
+%% Fixed spatial mesh
+
+J = 50;
+h = 1/J;
+
+x = (1:J-1)'*h;
+m = J-1;
+
+
+%% Spatial operator
+
+e = ones(m,1);
+
+A_h = (d/h^2)*spdiags([e,-2*e,e],-1:1,m,m);
+
+L_h = A_h + alpha*speye(m);
+
+
+
+%% Initial condition
+
+v1 = sin(pi*x);
+v2 = sin(2*pi*x);
+
+U0 = v1 + 0.5*v2;
+
+
+
+%% Exact semidiscrete solution
+
+mu1_h = 4/h^2*sin(pi*h/2)^2;
+mu2_h = 4/h^2*sin(pi*h)^2;
+
+
+lambda1_h = alpha-d*mu1_h;
+lambda2_h = alpha-d*mu2_h;
+
+
+U_exact_h = @(t) ...
+    exp(lambda1_h*t)*v1 ...
+    +0.5*exp(lambda2_h*t)*v2;
+
+
+
+%% Parareal parameters
+
+N_list = [20,40,80,160];
+
+M = 5;
+K = 3;
+
+
+Error=zeros(length(N_list),K+1);
+Order=NaN(length(N_list),K+1);
+
+
+
+%% Parameters for plotting
+N_plot = 20; 
+% N_plot = 80;       % choose one temporal grid
+k_plot = 3;        % choose Parareal iteration
+
+
+U_plot = [];
+DeltaT_plot = [];
+
+
+
+%% ============================================================
+% Main loop
+%% ============================================================
+
+
+for iN=1:length(N_list)
+
+
+    N=N_list(iN);
+
+    DeltaT=T/N;
+    dt=DeltaT/M;
+
+
+    fprintf('Computing N=%d\n',N);
+
+
+    %% Backward Euler
+
+    B=speye(m)-DeltaT*L_h;
+
+    Bdec=decomposition(B,'lu');
+
+
+    %% Storage
+
+    U=zeros(m,N+1,K+1);
+
+
+
+    %% k=0 coarse prediction
+
+    U(:,1,1)=U0;
+
+
+    for n=1:N
+
+        U(:,n+1,1)=Bdec\U(:,n,1);
+
+    end
+
+
+
+    %% Parareal iteration
+
+    for k=1:K
+
+
+        U(:,1,k+1)=U0;
+
+
+        for n=1:N
+
+
+            G_new=Bdec\U(:,n,k+1);
+
+
+            F_old=fine_RK4( ...
+                U(:,n,k), ...
+                L_h,...
+                dt,...
+                M);
+
+
+            G_old=Bdec\U(:,n,k);
+
+
+            U(:,n+1,k+1)=G_new+F_old-G_old;
+
+
+        end
+
+    end
+
+
+
+    %% Save solution for plotting
+
+    if N==N_plot
+
+        U_plot=U(:,:,k_plot+1);
+
+        DeltaT_plot=DeltaT;
+
+    end
+
+
+
+
+    %% Error computation
+
+    for k=0:K
+
+
+        max_err=0;
+
+
+        for n=0:N
+
+
+            tn=n*DeltaT;
+
+
+            Uh_ex=U_exact_h(tn);
+
+
+            err_vec=U(:,n+1,k+1)-Uh_ex;
+
+
+            err=sqrt(h*sum(err_vec.^2));
+
+
+            if err>max_err
+
+                max_err=err;
+
+            end
+
+
+        end
+
+
+        Error(iN,k+1)=max_err;
+
+
+    end
+
+
+end
+
+
+
+%% ============================================================
+% Convergence order
+%% ============================================================
+
+
+for i=2:length(N_list)
+
+    for k=0:K
+
+        Order(i,k+1)=...
+            log(Error(i-1,k+1)/Error(i,k+1))/log(2);
+
+    end
+
+end
+
+
+
+%% Display
+
+
+fprintf('\n');
+fprintf('============================================================\n');
+fprintf(' N        Error(k=0)       Error(k=1)       Error(k=2)       Error(k=3)\n');
+fprintf('============================================================\n');
+
+
+for i=1:length(N_list)
+
+    fprintf('%d   ',N_list(i));
+
+    for k=1:K+1
+
+        fprintf('%12.5e   ',Error(i,k));
+
+    end
+
+    fprintf('\n');
+
+end
+
+
+
+%% ============================================================
+% 3D plot: Exact semidiscrete solution
+%% ============================================================
+
+
+Nx=J+1;
+Nt=N_plot+1;
+
+
+x_full=linspace(0,1,Nx);
+
+t_full=linspace(0,T,Nt);
+
+
+U_exact_plot=zeros(Nx,Nt);
+
+
+
+for n=1:Nt
+
+    temp=U_exact_h(t_full(n));
+
+    U_exact_plot(:,n)=...
+        [0;temp;0];
+
+end
+
+
+
+[X,Tgrid]=meshgrid(x_full,t_full);
+
+
+
+figure(1)
+
+surf(X,Tgrid,U_exact_plot')
+
+shading interp
+
+xlabel('x')
+ylabel('t')
+zlabel('u(x,t)')
+
+title('Exact semidiscrete solution')
+
+view(45,30)
+
+grid on
+
+
+
+%% ============================================================
+% 3D plot: Parareal numerical solution
+%% ============================================================
+
+
+U_para_plot=zeros(Nx,Nt);
+
+
+
+for n=1:Nt
+
+    U_para_plot(:,n)=...
+        [0;U_plot(:,n);0];
+
+end
+
+
+
+figure(2)
+
+surf(X,Tgrid,U_para_plot')
+
+shading interp
+
+xlabel('x')
+ylabel('t')
+zlabel('u(x,t)')
+
+
+title(sprintf('Parareal numerical solution',...
+    N_plot,k_plot))
+
+
+view(45,30)
+
+grid on
+
+
+%% ============================================================
+% 3D plot: Pointwise error for k = 3
+%% ============================================================
+
+U_error_plot = zeros(Nx,Nt);
+
+for n = 1:Nt
+
+    % Exact semidiscrete solution at t_n
+    U_ex = U_exact_h(t_full(n));
+
+    % Pointwise absolute error
+    err_temp = abs(U_plot(:,n) - U_ex);
+
+    % Add boundary points
+    U_error_plot(:,n) = [0; err_temp; 0];
+
+end
+
+
+figure(3)
+
+surf(X,Tgrid,U_error_plot')
+
+shading interp
+
+xlabel('x')
+ylabel('t')
+zlabel('|e(x,t)|')
+
+title(sprintf('Pointwise error of Parareal solution (k=%d)', ...
+    k_plot))
+
+view(45,30)
+
+grid on
+
+colorbar
+
+%% ============================================================
+% RK4 fine propagator
+%% ============================================================
+
+function U=fine_RK4(U,L_h,dt,M)
+
+
+for j=1:M
+
+
+    K1=L_h*U;
+
+    K2=L_h*(U+0.5*dt*K1);
+
+    K3=L_h*(U+0.5*dt*K2);
+
+    K4=L_h*(U+dt*K3);
+
+
+
+    U=U+(dt/6)*(K1+2*K2+2*K3+K4);
+
+
+end
+
+
+end
