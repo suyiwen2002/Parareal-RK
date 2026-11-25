@@ -1,19 +1,76 @@
 function FisherKPP2D_Merged_Scaling_Tolerance()
-
+% FISHERKPP2D_MERGED_SCALING_TOLERANCE
+% Merge of the supplied Fisher-KPP StrongScaling ideal-model study and
+% ToleranceDriven Parareal study. No CN/ode15s methods are introduced here.
+%
+% PDE: u_t = D*Laplacian(u) + r*u.*(1-u), homogeneous Dirichlet BCs
+% u0(x,y) = exp(-alpha*((x-L/2)^2+(y-L/2)^2)).
+% Coarse: nonlinear BE solved with Picard fixed point and cached sparse LU.
+% Fine: classical RK4, each time slice contains M steps.
+%
+% FIXED N and M across worker counts => conventional fixed-workload
+% strong-scaling test, including P=6 when N/P is not an integer.
+%
+% TIMING PROTOCOL (identical everywhere):
+%  - warm-up excluded;
+%  - reference, fixed matrix LU, pool startup/shutdown excluded;
+%  - five independent tic/toc outer wall-clock timings per (P,K);
+%  - report mean +/- SAMPLE standard deviation (MATLAB std(x));
+%  - fine-phase wall clock includes parfor dispatch/synchronization;
+%  - "other" residual is NOT a direct communication-time measurement.
+%
+% TWO NONINTERCHANGEABLE SERIAL RK4 BASELINES:
+%  (A) MATCHED FINE:  N*M RK4 steps, used for classical Parareal speedup.
+%  (B) ACCURACY-MATCHED: serial RK4 step count screened separately for each
+%      tau using the SAME independent high-accuracy RK4 reference; speedups
+%      with respect to baseline B are reported under explicit names.
+%
+% THREE DISTINCT PERFORMANCE ESTIMATES:
+%  T_pred = (K+1)*N*C_G + K*ceil(N/P)*C_F
+%      CF = measured matched serial RK4 time / N
+%      CG = measured complete serial coarse-sweep time / N
+%  T_ideal_task = measured coarse kernel costs + correction algebra costs
+%                 + sum_k max(max_n fine_task_time,
+%                             sum_n fine_task_time/P)
+%      (optimistic zero-dispatch lower-bound proxy, NOT a true wall time);
+%  T_actual = measured complete Parareal wall-clock time (tic/toc).
+%
+% Tolerances ONLY LABEL eligibility. At fixed P,K,N,M, runtime itself does
+% not depend on tau. Each (P,K) configuration is run ONCE as five repeats,
+% then assessed under all five tolerances. For each (tau,P), pick the
+% smallest K in 1:Kmax meeting final-time error <= tau.
+%
+% OUTPUT CSVs and figures go into the CURRENT MATLAB WORKING DIRECTORY:
+%   FisherKPP2D_Merged_PerPK.csv
+%   FisherKPP2D_Merged_AllTolerances.csv
+%   FisherKPP2D_Merged_SelectedByTolerance.csv
+%   FisherKPP2D_Merged_RawPararealTimings.csv
+%   FisherKPP2D_Merged_PerIterationStages.csv
+%   FisherKPP2D_Merged_SerialAccuracyScreening.csv
+%   FisherKPP2D_Merged_SerialAccuracySelected.csv
+%   FisherKPP2D_Merged_BaselineRawTimings.csv
+%   FisherKPP2D_Merged_Checkpoint.mat (updated after each P)\n%   FisherKPP2D_Merged_Results.mat
+%   FisherKPP2D_Merged_PredictedSpeedup.png
+%   FisherKPP2D_Merged_MeasuredSpeedup.png
+%
+% MATLAB Parallel Computing Toolbox required. Test on your local machine.
 
 %% ============================== SETTINGS ================================
 L = 1.0; T = 5.0; D = 1.0e-2; r = 1.0;
 alpha = 100.0;
-
 J = 160;
-N = 128;
-M = 500;
-Plist = [6 8 16 32 64];
-Kmax = 3;
+ N = 64;
+ M = 1000;
+% J = 160;
+% N = 128;
+% M = 500;
+% Plist = [6 8 16 32 64];
+Plist = [32];
+Kmax = 6;
 Klist = 1:Kmax;
 nRepeats = 5;
-TolList = [1e-3 1e-4 1e-5 1e-6 1e-7];
-
+% TolList = [1e-3 1e-4 1e-5 1e-6 1e-7];
+TolList = [1e-4 1e-5 1e-6 1e-7];
 % Independent RK4 semidiscrete references, 40k and 80k time steps.
 Nref = 40;
 MrefCoarse = 1000;

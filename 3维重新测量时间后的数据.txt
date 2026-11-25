@@ -1,0 +1,321 @@
+>> ReactionDiffusion3D_Unified_ThreeTables
+
+============================================================
+3D REACTION-DIFFUSION: THREE TABLES / SHARED SERIAL BASELINE
+N=64, Klist=[1 2 3], repeats=5 (mean +/- sample SD)
+P scaling: [6 8 16 32 64]; M study: [50 100 150]; J study: [40 60 80 120 160]
+Unique (J,M,P) configurations: 11 (requested rows before dedup: 13)
+The same (J=40,M=100,P=32) timings are reused in ALL three tables.
+============================================================
+
+============================================================
+SPATIAL GRID J=40, ndof=59319, M values=[100 50 150]
+DST setup=0.002706s (excluded)
+============================================================
+  J=40: DST BE residual relative norm: 5.355e-16
+  J=40: matrix-free vs sparse Lh rel difference = 1.181e-16
+  J=40: DST BE vs sparse Cholesky rel difference = 1.046e-15
+
+SERIAL RK4 BASELINE: J=40,M=100,steps=6400
+  serial rep 1/5: 27.976293s
+  serial rep 2/5: 27.985358s
+  serial rep 3/5: 28.092481s
+  serial rep 4/5: 27.978784s
+  serial rep 5/5: 28.121604s
+  SERIAL mean +/- SD: 28.030904 +/- 0.070341 s
+
+SERIAL RK4 BASELINE: J=40,M=50,steps=3200
+  serial rep 1/5: 14.413769s
+  serial rep 2/5: 14.013933s
+  serial rep 3/5: 14.316920s
+  serial rep 4/5: 13.836249s
+  serial rep 5/5: 13.822595s
+  SERIAL mean +/- SD: 14.080693 +/- 0.272748 s
+
+SERIAL RK4 BASELINE: J=40,M=150,steps=9600
+  serial rep 1/5: 42.228615s
+  serial rep 2/5: 42.998970s
+  serial rep 3/5: 41.904272s
+  serial rep 4/5: 42.337501s
+  serial rep 5/5: 41.972632s
+  SERIAL mean +/- SD: 42.288398 +/- 0.435362 s
+
+Starting parpool P=6 (startup EXCLUDED)...
+Starting parallel pool (parpool) using the 'local' profile ...
+connected to 6 workers.
+
+------------------------------------------------------------
+PARAREAL J=40 M=100 P=6 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 28.030904 +/- 0.070341 s
+------------------------------------------------------------
+  J= 40 M=100 P= 6 K=1 rep=1/5: T=7.651837s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 6 K=1 rep=2/5: T=7.079753s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 6 K=1 rep=3/5: T=7.053682s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 6 K=1 rep=4/5: T=6.961118s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 6 K=1 rep=5/5: T=7.162882s, Epara-serial=5.3167e-03
+  ==> K=1: Para=7.181854 +/- 0.272406 s, speedup=3.9030, efficiency=65.05%, prediction=6.830325s, error=5.3167e-03
+  J= 40 M=100 P= 6 K=2 rep=1/5: T=13.142027s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 6 K=2 rep=2/5: T=13.026058s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 6 K=2 rep=3/5: T=13.093864s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 6 K=2 rep=4/5: T=13.033224s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 6 K=2 rep=5/5: T=13.550788s, Epara-serial=1.7390e-04
+  ==> K=2: Para=13.169192 +/- 0.218519 s, speedup=2.1285, efficiency=35.48%, prediction=12.654393s, error=1.7390e-04
+  J= 40 M=100 P= 6 K=3 rep=1/5: T=19.515696s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 6 K=3 rep=2/5: T=18.683546s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 6 K=3 rep=3/5: T=19.088924s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 6 K=3 rep=4/5: T=19.778383s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 6 K=3 rep=5/5: T=19.437141s, Epara-serial=4.1831e-06
+  ==> K=3: Para=19.300738 +/- 0.423895 s, speedup=1.4523, efficiency=24.21%, prediction=18.478461s, error=4.1831e-06
+Parallel pool using the 'local' profile is shutting down.
+
+Starting parpool P=8 (startup EXCLUDED)...
+Starting parallel pool (parpool) using the 'local' profile ...
+connected to 8 workers.
+
+------------------------------------------------------------
+PARAREAL J=40 M=100 P=8 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 28.030904 +/- 0.070341 s
+------------------------------------------------------------
+  J= 40 M=100 P= 8 K=1 rep=1/5: T=6.232757s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 8 K=1 rep=2/5: T=6.164604s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 8 K=1 rep=3/5: T=5.876430s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 8 K=1 rep=4/5: T=6.019725s, Epara-serial=5.3167e-03
+  J= 40 M=100 P= 8 K=1 rep=5/5: T=5.834634s, Epara-serial=5.3167e-03
+  ==> K=1: Para=6.025630 +/- 0.173918 s, speedup=4.6519, efficiency=58.15%, prediction=5.516376s, error=5.3167e-03
+  J= 40 M=100 P= 8 K=2 rep=1/5: T=10.693109s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 8 K=2 rep=2/5: T=10.903623s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 8 K=2 rep=3/5: T=11.066983s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 8 K=2 rep=4/5: T=10.849485s, Epara-serial=1.7390e-04
+  J= 40 M=100 P= 8 K=2 rep=5/5: T=11.078630s, Epara-serial=1.7390e-04
+  ==> K=2: Para=10.918366 +/- 0.160837 s, speedup=2.5673, efficiency=32.09%, prediction=10.026496s, error=1.7390e-04
+  J= 40 M=100 P= 8 K=3 rep=1/5: T=15.686462s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 8 K=3 rep=2/5: T=15.701225s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 8 K=3 rep=3/5: T=15.953010s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 8 K=3 rep=4/5: T=15.298862s, Epara-serial=4.1831e-06
+  J= 40 M=100 P= 8 K=3 rep=5/5: T=15.539095s, Epara-serial=4.1831e-06
+  ==> K=3: Para=15.635731 +/- 0.239973 s, speedup=1.7927, efficiency=22.41%, prediction=14.536615s, error=4.1831e-06
+Parallel pool using the 'local' profile is shutting down.
+
+Starting parpool P=16 (startup EXCLUDED)...
+Starting parallel pool (parpool) using the 'local' profile ...
+connected to 16 workers.
+
+------------------------------------------------------------
+PARAREAL J=40 M=100 P=16 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 28.030904 +/- 0.070341 s
+------------------------------------------------------------
+  J= 40 M=100 P=16 K=1 rep=1/5: T=4.606737s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=16 K=1 rep=2/5: T=4.381934s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=16 K=1 rep=3/5: T=4.166061s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=16 K=1 rep=4/5: T=3.996900s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=16 K=1 rep=5/5: T=4.056836s, Epara-serial=5.3167e-03
+  ==> K=1: Para=4.241694 +/- 0.251366 s, speedup=6.6084, efficiency=41.30%, prediction=3.764445s, error=5.3167e-03
+  J= 40 M=100 P=16 K=2 rep=1/5: T=7.333504s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=16 K=2 rep=2/5: T=7.075095s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=16 K=2 rep=3/5: T=7.255065s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=16 K=2 rep=4/5: T=7.406621s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=16 K=2 rep=5/5: T=8.096615s, Epara-serial=1.7390e-04
+  ==> K=2: Para=7.433380 +/- 0.390748 s, speedup=3.7709, efficiency=23.57%, prediction=6.522633s, error=1.7390e-04
+  J= 40 M=100 P=16 K=3 rep=1/5: T=11.337625s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=16 K=3 rep=2/5: T=10.342190s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=16 K=3 rep=3/5: T=10.010171s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=16 K=3 rep=4/5: T=10.410414s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=16 K=3 rep=5/5: T=9.979537s, Epara-serial=4.1831e-06
+  ==> K=3: Para=10.415987 +/- 0.550016 s, speedup=2.6911, efficiency=16.82%, prediction=9.280821s, error=4.1831e-06
+Parallel pool using the 'local' profile is shutting down.
+
+Starting parpool P=32 (startup EXCLUDED)...
+Starting parallel pool (parpool) using the 'local' profile ...
+connected to 32 workers.
+
+------------------------------------------------------------
+PARAREAL J=40 M=50 P=32 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 14.080693 +/- 0.272748 s
+------------------------------------------------------------
+  J= 40 M= 50 P=32 K=1 rep=1/5: T=2.474472s, Epara-serial=5.3167e-03
+  J= 40 M= 50 P=32 K=1 rep=2/5: T=2.433280s, Epara-serial=5.3167e-03
+  J= 40 M= 50 P=32 K=1 rep=3/5: T=2.546488s, Epara-serial=5.3167e-03
+  J= 40 M= 50 P=32 K=1 rep=4/5: T=2.320840s, Epara-serial=5.3167e-03
+  J= 40 M= 50 P=32 K=1 rep=5/5: T=2.071204s, Epara-serial=5.3167e-03
+  ==> K=1: Para=2.369257 +/- 0.185580 s, speedup=5.9431, efficiency=18.57%, prediction=2.452535s, error=5.3167e-03
+  J= 40 M= 50 P=32 K=2 rep=1/5: T=3.396632s, Epara-serial=1.7390e-04
+  J= 40 M= 50 P=32 K=2 rep=2/5: T=3.658259s, Epara-serial=1.7390e-04
+  J= 40 M= 50 P=32 K=2 rep=3/5: T=3.411492s, Epara-serial=1.7390e-04
+  J= 40 M= 50 P=32 K=2 rep=4/5: T=3.409239s, Epara-serial=1.7390e-04
+  J= 40 M= 50 P=32 K=2 rep=5/5: T=3.789271s, Epara-serial=1.7390e-04
+  ==> K=2: Para=3.532979 +/- 0.180306 s, speedup=3.9855, efficiency=12.45%, prediction=3.898813s, error=1.7390e-04
+  J= 40 M= 50 P=32 K=3 rep=1/5: T=5.580093s, Epara-serial=4.1831e-06
+  J= 40 M= 50 P=32 K=3 rep=2/5: T=5.634735s, Epara-serial=4.1831e-06
+  J= 40 M= 50 P=32 K=3 rep=3/5: T=5.036302s, Epara-serial=4.1831e-06
+  J= 40 M= 50 P=32 K=3 rep=4/5: T=5.079148s, Epara-serial=4.1831e-06
+  J= 40 M= 50 P=32 K=3 rep=5/5: T=4.758700s, Epara-serial=4.1831e-06
+  ==> K=3: Para=5.217795 +/- 0.376839 s, speedup=2.6986, efficiency=8.43%, prediction=5.345091s, error=4.1831e-06
+
+------------------------------------------------------------
+PARAREAL J=40 M=100 P=32 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 28.030904 +/- 0.070341 s
+------------------------------------------------------------
+  J= 40 M=100 P=32 K=1 rep=1/5: T=2.601801s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=32 K=1 rep=2/5: T=2.676229s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=32 K=1 rep=3/5: T=2.621406s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=32 K=1 rep=4/5: T=2.587871s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=32 K=1 rep=5/5: T=2.697724s, Epara-serial=5.3167e-03
+  ==> K=1: Para=2.637006 +/- 0.047755 s, speedup=10.6298, efficiency=33.22%, prediction=2.888479s, error=5.3167e-03
+  J= 40 M=100 P=32 K=2 rep=1/5: T=5.045079s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=32 K=2 rep=2/5: T=4.544370s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=32 K=2 rep=3/5: T=4.535622s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=32 K=2 rep=4/5: T=4.543994s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=32 K=2 rep=5/5: T=4.477672s, Epara-serial=1.7390e-04
+  ==> K=2: Para=4.629347 +/- 0.234056 s, speedup=6.0550, efficiency=18.92%, prediction=4.770701s, error=1.7390e-04
+  J= 40 M=100 P=32 K=3 rep=1/5: T=6.372907s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=32 K=3 rep=2/5: T=6.404536s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=32 K=3 rep=3/5: T=6.374959s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=32 K=3 rep=4/5: T=6.474069s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=32 K=3 rep=5/5: T=6.881417s, Epara-serial=4.1831e-06
+  ==> K=3: Para=6.501577 +/- 0.216241 s, speedup=4.3114, efficiency=13.47%, prediction=6.652923s, error=4.1831e-06
+
+------------------------------------------------------------
+PARAREAL J=40 M=150 P=32 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 42.288398 +/- 0.435362 s
+------------------------------------------------------------
+  J= 40 M=150 P=32 K=1 rep=1/5: T=3.213096s, Epara-serial=5.3167e-03
+  J= 40 M=150 P=32 K=1 rep=2/5: T=3.173461s, Epara-serial=5.3167e-03
+  J= 40 M=150 P=32 K=1 rep=3/5: T=3.213183s, Epara-serial=5.3167e-03
+  J= 40 M=150 P=32 K=1 rep=4/5: T=3.152100s, Epara-serial=5.3167e-03
+  J= 40 M=150 P=32 K=1 rep=5/5: T=3.273804s, Epara-serial=5.3167e-03
+  ==> K=1: Para=3.205129 +/- 0.046528 s, speedup=13.1940, efficiency=41.23%, prediction=3.334026s, error=5.3167e-03
+  J= 40 M=150 P=32 K=2 rep=1/5: T=5.604058s, Epara-serial=1.7390e-04
+  J= 40 M=150 P=32 K=2 rep=2/5: T=5.775738s, Epara-serial=1.7390e-04
+  J= 40 M=150 P=32 K=2 rep=3/5: T=5.913043s, Epara-serial=1.7390e-04
+  J= 40 M=150 P=32 K=2 rep=4/5: T=5.668829s, Epara-serial=1.7390e-04
+  J= 40 M=150 P=32 K=2 rep=5/5: T=5.737713s, Epara-serial=1.7390e-04
+  ==> K=2: Para=5.739876 +/- 0.117017 s, speedup=7.3675, efficiency=23.02%, prediction=5.661795s, error=1.7390e-04
+  J= 40 M=150 P=32 K=3 rep=1/5: T=8.231272s, Epara-serial=4.1831e-06
+  J= 40 M=150 P=32 K=3 rep=2/5: T=8.187029s, Epara-serial=4.1831e-06
+  J= 40 M=150 P=32 K=3 rep=3/5: T=8.478655s, Epara-serial=4.1831e-06
+  J= 40 M=150 P=32 K=3 rep=4/5: T=8.127499s, Epara-serial=4.1831e-06
+  J= 40 M=150 P=32 K=3 rep=5/5: T=8.062349s, Epara-serial=4.1831e-06
+  ==> K=3: Para=8.217361 +/- 0.159289 s, speedup=5.1462, efficiency=16.08%, prediction=7.989564s, error=4.1831e-06
+Parallel pool using the 'local' profile is shutting down.
+
+Starting parpool P=64 (startup EXCLUDED)...
+Starting parallel pool (parpool) using the 'local' profile ...
+connected to 64 workers.
+
+------------------------------------------------------------
+PARAREAL J=40 M=100 P=64 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 28.030904 +/- 0.070341 s
+------------------------------------------------------------
+  J= 40 M=100 P=64 K=1 rep=1/5: T=2.407946s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=64 K=1 rep=2/5: T=2.440307s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=64 K=1 rep=3/5: T=2.539597s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=64 K=1 rep=4/5: T=2.323565s, Epara-serial=5.3167e-03
+  J= 40 M=100 P=64 K=1 rep=5/5: T=2.367671s, Epara-serial=5.3167e-03
+  ==> K=1: Para=2.415817 +/- 0.081871 s, speedup=11.6031, efficiency=18.13%, prediction=2.450496s, error=5.3167e-03
+  J= 40 M=100 P=64 K=2 rep=1/5: T=4.028787s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=64 K=2 rep=2/5: T=4.043062s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=64 K=2 rep=3/5: T=4.170704s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=64 K=2 rep=4/5: T=4.021298s, Epara-serial=1.7390e-04
+  J= 40 M=100 P=64 K=2 rep=5/5: T=4.055782s, Epara-serial=1.7390e-04
+  ==> K=2: Para=4.063927 +/- 0.061146 s, speedup=6.8975, efficiency=10.78%, prediction=3.894735s, error=1.7390e-04
+  J= 40 M=100 P=64 K=3 rep=1/5: T=5.881772s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=64 K=3 rep=2/5: T=5.752855s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=64 K=3 rep=3/5: T=5.865338s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=64 K=3 rep=4/5: T=5.910288s, Epara-serial=4.1831e-06
+  J= 40 M=100 P=64 K=3 rep=5/5: T=5.705819s, Epara-serial=4.1831e-06
+  ==> K=3: Para=5.823215 +/- 0.088766 s, speedup=4.8136, efficiency=7.52%, prediction=5.338975s, error=4.1831e-06
+Parallel pool using the 'local' profile is shutting down.
+
+============================================================
+SPATIAL GRID J=60, ndof=205379, M values=100
+DST setup=0.001365s (excluded)
+============================================================
+  J=60: DST BE residual relative norm: 5.360e-16
+
+SERIAL RK4 BASELINE: J=60,M=100,steps=6400
+  serial rep 1/5: 222.149018s
+  serial rep 2/5: 222.396964s
+  serial rep 3/5: 222.996715s
+  serial rep 4/5: 222.051494s
+  serial rep 5/5: 223.623847s
+  SERIAL mean +/- SD: 222.643608 +/- 0.659849 s
+
+Starting parpool P=32 (startup EXCLUDED)...
+Starting parallel pool (parpool) using the 'local' profile ...
+connected to 32 workers.
+
+------------------------------------------------------------
+PARAREAL J=60 M=100 P=32 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 222.643608 +/- 0.659849 s
+------------------------------------------------------------
+  J= 60 M=100 P=32 K=1 rep=1/5: T=27.793251s, Epara-serial=5.3140e-03
+  J= 60 M=100 P=32 K=1 rep=2/5: T=21.747045s, Epara-serial=5.3140e-03
+  J= 60 M=100 P=32 K=1 rep=3/5: T=22.196668s, Epara-serial=5.3140e-03
+  J= 60 M=100 P=32 K=1 rep=4/5: T=27.319491s, Epara-serial=5.3140e-03
+  J= 60 M=100 P=32 K=1 rep=5/5: T=26.346493s, Epara-serial=5.3140e-03
+  ==> K=1: Para=25.080590 +/- 2.889777 s, speedup=8.8771, efficiency=27.74%, prediction=13.010136s, error=5.3140e-03
+  J= 60 M=100 P=32 K=2 rep=1/5: T=45.341128s, Epara-serial=1.7377e-04
+  J= 60 M=100 P=32 K=2 rep=2/5: T=58.837973s, Epara-serial=1.7377e-04
+  J= 60 M=100 P=32 K=2 rep=3/5: T=45.203443s, Epara-serial=1.7377e-04
+  J= 60 M=100 P=32 K=2 rep=4/5: T=47.857118s, Epara-serial=1.7377e-04
+  J= 60 M=100 P=32 K=2 rep=5/5: T=49.125156s, Epara-serial=1.7377e-04
+  ==> K=2: Para=49.272964 +/- 5.602147 s, speedup=4.5186, efficiency=14.12%, prediction=22.994011s, error=1.7377e-04
+  J= 60 M=100 P=32 K=3 rep=1/5: T=67.457785s, Epara-serial=4.1790e-06
+  J= 60 M=100 P=32 K=3 rep=2/5: T=70.034653s, Epara-serial=4.1790e-06
+  J= 60 M=100 P=32 K=3 rep=3/5: T=92.539357s, Epara-serial=4.1790e-06
+  J= 60 M=100 P=32 K=3 rep=4/5: T=63.548479s, Epara-serial=4.1790e-06
+  J= 60 M=100 P=32 K=3 rep=5/5: T=67.493228s, Epara-serial=4.1790e-06
+  ==> K=3: Para=72.214700 +/- 11.595993 s, speedup=3.0831, efficiency=9.63%, prediction=32.977885s, error=4.1790e-06
+Parallel pool using the 'local' profile is shutting down.
+
+============================================================
+SPATIAL GRID J=80, ndof=493039, M values=100
+DST setup=0.002599s (excluded)
+============================================================
+  J=80: DST BE residual relative norm: 6.631e-16
+
+SERIAL RK4 BASELINE: J=80,M=100,steps=6400
+  serial rep 1/5: 505.120468s
+  serial rep 2/5: 501.153444s
+  serial rep 3/5: 504.055912s
+  serial rep 4/5: 511.886691s
+  serial rep 5/5: 508.470156s
+  SERIAL mean +/- SD: 506.137334 +/- 4.144354 s
+
+Starting parpool P=32 (startup EXCLUDED)...
+Starting parallel pool (parpool) using the 'local' profile ...
+connected to 32 workers.
+
+------------------------------------------------------------
+PARAREAL J=80 M=100 P=32 / N=64, K=[1,2,3]
+Reuse shared SERIAL = 506.137334 +/- 4.144354 s
+------------------------------------------------------------
+  J= 80 M=100 P=32 K=1 rep=1/5: T=58.877163s, Epara-serial=5.3131e-03
+  J= 80 M=100 P=32 K=1 rep=2/5: T=55.367707s, Epara-serial=5.3131e-03
+  J= 80 M=100 P=32 K=1 rep=3/5: T=56.095282s, Epara-serial=5.3131e-03
+  J= 80 M=100 P=32 K=1 rep=4/5: T=56.765739s, Epara-serial=5.3131e-03
+  J= 80 M=100 P=32 K=1 rep=5/5: T=59.940259s, Epara-serial=5.3131e-03
+  ==> K=1: Para=57.409230 +/- 1.928036 s, speedup=8.8163, efficiency=27.55%, prediction=29.650788s, error=5.3131e-03
+  J= 80 M=100 P=32 K=2 rep=1/5: T=105.734689s, Epara-serial=1.7372e-04
+  J= 80 M=100 P=32 K=2 rep=2/5: T=106.458419s, Epara-serial=1.7372e-04
+  J= 80 M=100 P=32 K=2 rep=3/5: T=108.059951s, Epara-serial=1.7372e-04
+  J= 80 M=100 P=32 K=2 rep=4/5: T=119.532608s, Epara-serial=1.7372e-04
+  J= 80 M=100 P=32 K=2 rep=5/5: T=110.948338s, Epara-serial=1.7372e-04
+  ==> K=2: Para=110.146801 +/- 5.616086 s, speedup=4.5951, efficiency=14.36%, prediction=52.384578s, error=1.7372e-04
+  J= 80 M=100 P=32 K=3 rep=1/5: T=162.232382s, Epara-serial=4.1775e-06
+  J= 80 M=100 P=32 K=3 rep=2/5: T=167.386346s, Epara-serial=4.1775e-06
+  J= 80 M=100 P=32 K=3 rep=3/5: T=180.480993s, Epara-serial=4.1775e-06
+  J= 80 M=100 P=32 K=3 rep=4/5: T=173.757472s, Epara-serial=4.1775e-06
+  J= 80 M=100 P=32 K=3 rep=5/5: T=180.394319s, Epara-serial=4.1775e-06
+  ==> K=3: Para=172.850302 +/- 8.039864 s, speedup=2.9282, efficiency=9.15%, prediction=75.118368s, error=4.1775e-06
+Parallel pool using the 'local' profile is shutting down.
+
+============================================================
+SPATIAL GRID J=120, ndof=1685159, M values=100
+DST setup=0.008433s (excluded)
+============================================================
+  J=120: DST BE residual relative norm: 6.575e-16
+
+SERIAL RK4 BASELINE: J=120,M=100,steps=6400
+  serial rep 1/5: 1823.628056s
+  serial rep 2/5: 1793.432700s
