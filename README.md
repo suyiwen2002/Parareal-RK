@@ -1,14 +1,41 @@
-Reference MATLAB implementation of Parareal time integration with independently selectable Runge–Kutta–type coarse and fine propagators for semilinear reaction–diffusion problems.
-Requirements
-MATLAB R2018b or later (scripts with local functions are used; 4.2 and
-4.2.2 note R2016b as their own minimum).
-Parallel Computing Toolbox — required by 4.2, 4.2.1, 4.2.2, 4.3,
-4.3.1 and 4.4, which parallelise the fine propagator over coarse intervals
-with parfor.
-No other toolboxes are used; the spatial discretisation uses spdiags and
-sparse direct solves only (MATLAB built-ins).
-Memory: J = 160 in 2D is 25281 unknowns and runs comfortably on a
-workstation; the 3D case in 4.4 (J = 160, 159^3 ≈ 4.0e6 unknowns) needs a
-large-memory node. All timings reported in the paper were obtained on a
-Shizi Cluster SS750-T3 node (2 × Intel Xeon Platinum 8350C, 64 cores,
-512 GB RAM).
+Parareal-RK
+MATLAB source code for the numerical experiments presented in the manuscript:
+Iteration–Dependent Convergence and Parallel Performance of Parareal–Runge–Kutta Methods for Semilinear Parabolic Equations
+Authors: Qi Zhang and Yiwen Su
+
+1. Computational Environment
+Software: MATLAB R2018b
+Toolbox: Parallel Computing Toolbox
+Server: Shizi Cluster SS750T3
+CPU: Intel Xeon Platinum 8350C
+Physical CPU cores: 64
+Memory: 512 GB
+2. Numerical Experiments
+The program files are named according to the corresponding sections, figures, and tables in the manuscript.
+Filename | Corresponding result
+4.1figure1 | Figure 1
+4.1figure2 | Figure 2
+4.1table2 | Table 2
+4.1table3 | Table 3
+4.1table4 | Table 4
+4.2figure3 | Figure 3
+4.2figure4 | Figure 4
+4.2table5 | Table 5
+4.2table6 | Table 6
+4.2table7 | Table 7
+4.3figure5 | Figure 5
+4.3figure6 | Figure 6
+4.3table8 table9 | Tables 8 and 9
+4.3table10 12 13 | Tables 10, 12, and 13
+4.3table14 | Table 14
+4.3table15,16 | Tables 15 and 16
+4.3table17 | Table 17
+3. Reproduction Instructions
+Download the repository.
+Open the corresponding source code in MATLAB.
+For files without a .m extension, save a local copy with a valid MATLAB filename and the .m extension. For function files, use the main function name.
+Set the numerical parameters according to the manuscript and run the program.
+The experimental parameters and reference-solution settings are described in Section 4 of the manuscript.
+4. Timing and Reproducibility
+The parallel performance experiments use MATLAB parfor. Runtime statistics in Section 4.3 are calculated from five independent runs.
+Numerical errors and convergence orders may exhibit small differences across computational environments. Runtime, speedup, and parallel efficiency depend on the hardware and software configurations.
