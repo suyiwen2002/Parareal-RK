@@ -1,0 +1,335 @@
+function Comment22_3D()
+% Supplement only: original matrix-free RK4 and DST-I BE kernels.
+% J=40,N=64,M=100,K=2; P=32,64; serial candidate Ns=350,400,800.
+% Fresh pool each repeat. Excludes MATLAB startup, reference and teardown.
+% RSS sampled separately on warm pool during the solve.
+L=1; T=5; D=0.01; lambda=1;
+J=40; N=64; M=100; K=2; R=5; tau=1e-3;
+old=maxNumCompThreads; maxNumCompThreads(1);
+guard=onCleanup(@() maxNumCompThreads(old)); %#ok<NASGU>
+closePool(); pg=onCleanup(@closePool); %#ok<NASGU>
+h=L/J;
+u0=setup3D(J,L);
+uRef=exp((lambda-3*D*(pi/L)^2)*T)*u0;
+clear u0
+% columns: P, Ns (for Parareal Ns is total fine steps)
+configs=[0 350;0 400;0 800;0 N*M;32 N*M;64 N*M];
+Raw=table();
+for i=1:size(configs,1)
+    P=configs(i,1); Ns=configs(i,2); dt=T/Ns;
+    rho=max(0,12*D/h^2*cos(pi/(2*J))^2-lambda);
+    assert(dt*rho<2.785,'Negative-real-axis RK4 stability failed.');
+    for rep=1:R
+        closePool();
+        tAll=tic; t=tic;
+        u0=setup3D(J,L);
+        if P>0, G=buildDSTSolver3D(J,L,D,lambda,T/N); end
+        setup=toc(t);
+        t=tic;
+        if P>0, pool=localPool(P); end %#ok<NASGU>
+        poolTime=toc(t);
+        t=tic;
+        if P==0
+            w=fineRK4Linear3DMatrixFree(u0,J,L,D,lambda,dt,1); %#ok<NASGU>
+        else
+            ww=zeros(P,1);
+            parfor j=1:P
+                w=fineRK4Linear3DMatrixFree(u0,J,L,D,lambda,dt,1);
+                ww(j)=w(1);
+            end
+            assert(all(isfinite(ww)));
+            w=coarseBackwardEulerLinear3D(u0,G); %#ok<NASGU>
+            [~,~]=runPararealLinear3D_DST_MemoryEfficient(u0,J,L,D,lambda,G,2,M,dt,1);
+        end
+        warm=toc(t);
+        if P==0
+            solve=@() fineRK4Linear3DMatrixFree(u0,J,L,D,lambda,dt,Ns);
+        else
+            solve=@() runPararealLinear3D_DST_MemoryEfficient(u0,J,L,D,lambda,G,N,M,dt,K);
+        end
+        t=tic; y=solve(); ts=toc(t); total=toc(tAll);
+        E=relativeError(y,uRef);
+        [pids,threads]=processInfo(P);
+        fprintf('3D P=%d Ns=%d repeat=%d total=%.4f solve=%.4f error=%.5e threads=%s\n',P,Ns,rep,total,ts,E,mat2str(threads));
+        rss=NaN;
+        if rep==R, rss=sampleMemory(pids,solve); end
+        wtMin=NaN; wtMax=NaN;
+        if numel(threads)>1, wtMin=min(threads(2:end)); wtMax=max(threads(2:end)); end
+        row=table(P,Ns,rep,E,setup,poolTime,warm,ts,total,rss,threads(1),min(threads),max(threads),wtMin,wtMax, ...
+            'VariableNames',{'P','Ns','Repeat','Error','Setup_s','Pool_s','Warm_s','Solve_s','Total_s','PeakRSS_GiB','ClientThreads','MinProcessThreads','MaxProcessThreads','WorkerThreadsMin','WorkerThreadsMax'});
+        if isempty(Raw), Raw=row; else, Raw=[Raw;row]; end %#ok<AGROW>
+        writetable(Raw,'Comment22_3D_raw.csv');
+        closePool(); clear solve y G u0 w ww pool
+    end
+end
+Summary=summarize22(Raw,{'P','Ns'});
+eligible=Summary.P==0 & Summary.ErrorMax<=tau;
+q=Summary(eligible,:);
+if isempty(q)
+    warning('No tuned serial candidate meets tolerance.');
+else
+    [~,idx]=min(q.TotalMean_s);
+    fprintf('Fastest tested accuracy-qualified serial candidate (total time):\n');
+    disp(q(idx,:)); writetable(q(idx,:),'Comment22_3D_tuned.csv');
+end
+disp(Summary); writetable(Summary,'Comment22_3D_summary.csv');
+end
+
+function u0=setup3D(J,L)
+x=(1:J-1)'*(L/J);
+[X,Y,Z]=ndgrid(x,x,x);
+u0=sin(pi*X/L).*sin(pi*Y/L).*sin(pi*Z/L); u0=u0(:);
+end
+
+
+function S=summarize22(Raw,keys)
+S=unique(Raw(:,keys),'rows','stable');
+fields={'ErrorMax','SetupMean_s','PoolMean_s','WarmMean_s','SolveMean_s','SolveSD_s', ...
+        'TotalMean_s','TotalSD_s','PeakRSS_GiB','ClientThreads','MinProcessThreads','MaxProcessThreads', ...
+        'WorkerThreadsMin','WorkerThreadsMax'};
+for f=1:numel(fields)
+    S.(fields{f})=nan(height(S),1);
+end
+for i=1:height(S)
+    q=true(height(Raw),1);
+    for j=1:numel(keys)
+        key=keys{j}; values=S.(key); q=q & Raw.(key)==values(i);
+    end
+    a=Raw(q,:);
+    S.ErrorMax(i,1)=max(a.Error);
+    S.SetupMean_s(i,1)=mean(a.Setup_s);
+    S.PoolMean_s(i,1)=mean(a.Pool_s);
+    S.WarmMean_s(i,1)=mean(a.Warm_s);
+    S.SolveMean_s(i,1)=mean(a.Solve_s);
+    S.SolveSD_s(i,1)=std(a.Solve_s);
+    S.TotalMean_s(i,1)=mean(a.Total_s);
+    S.TotalSD_s(i,1)=std(a.Total_s);
+    m=a.PeakRSS_GiB(isfinite(a.PeakRSS_GiB));
+    if isempty(m), S.PeakRSS_GiB(i,1)=NaN; else, S.PeakRSS_GiB(i,1)=max(m); end
+    S.ClientThreads(i,1)=max(a.ClientThreads);
+    S.MinProcessThreads(i,1)=min(a.MinProcessThreads);
+    S.MaxProcessThreads(i,1)=max(a.MaxProcessThreads);
+    if S.P(i)>0
+        S.WorkerThreadsMin(i,1)=min(a.WorkerThreadsMin);
+        S.WorkerThreadsMax(i,1)=max(a.WorkerThreadsMax);
+    end
+end
+end
+
+
+function p = localPool(P)
+    p=parpool('local',P);
+    assert(p.NumWorkers==P,'Unexpected worker count.');
+end
+
+function closePool()
+    p=gcp('nocreate');
+    if ~isempty(p), delete(p); end
+end
+
+function [pidList,threadList]=processInfo(P)
+    pidList=feature('getpid');
+    threadList=maxNumCompThreads;
+    if P>0
+        spmd
+            workerPID=feature('getpid');
+            workerThreads=maxNumCompThreads;
+        end
+        for i=1:P
+            pidList(end+1)=workerPID{i}; %#ok<AGROW>
+            threadList(end+1)=workerThreads{i}; %#ok<AGROW>
+        end
+    end
+end
+
+function peak=sampleMemory(pids,solve)
+% Linux only. Separate solve run; monitor concurrent aggregate RSS (GiB).
+% Does not include pool startup; shared pages may be counted repeatedly.
+% Polling may miss short-lived peaks. NaN on unavailable measurement.
+    peak=NaN;
+    if ~isunix || ismac, warning('RSS sampling requires Linux.'); return; end
+    base=tempname;
+    stopFile=[base '.stop']; outFile=[base '.rss'];
+    readyFile=[base '.ready']; script=[base '.sh'];
+    pidArg=sprintf('%d,',pids); pidArg(end)=[];
+    fid=fopen(script,'w');
+    assert(fid>=0,'Cannot create RSS sampling script.');
+    fprintf(fid,'#!/bin/sh\nmax=0\n');
+    fprintf(fid,'while :; do\n');
+    fprintf(fid,'  x=$(ps -o rss= -p %s | awk ''{s+=$1} END {print s+0}'')\n',pidArg);
+    fprintf(fid,'  [ "$x" -gt "$max" ] && max=$x\n');
+    fprintf(fid,'  touch "%s"\n',readyFile);
+    fprintf(fid,'  [ -f "%s" ] && break\n',stopFile);
+    fprintf(fid,'  sleep 0.2\ndone\n');
+    fprintf(fid,'echo "$max" > "%s"\n',outFile);
+    fclose(fid);
+    [status,~]=system(sprintf('sh "%s" </dev/null >/dev/null 2>&1 &',script));
+    if status~=0, warning('RSS monitor startup failed.'); return; end
+    guard=onCleanup(@() stopSampler(stopFile)); %#ok<NASGU>
+    t=tic;
+    while ~exist(readyFile,'file') && toc(t)<10, pause(0.05); end
+    if ~exist(readyFile,'file'), warning('RSS monitor not ready.'); return; end
+    result=solve(); %#ok<NASGU>
+    stopSampler(stopFile);
+    t=tic;
+    while ~exist(outFile,'file') && toc(t)<10, pause(0.05); end
+    if exist(outFile,'file')
+        f=fopen(outFile,'r');
+        if f>=0
+            v=fscanf(f,'%f',1); fclose(f);
+            if ~isempty(v) && v>0, peak=v/1024^2; end
+        end
+    end
+    if exist(outFile,'file')
+        delete(script); delete(readyFile); delete(outFile);
+        % Leave stopFile until onCleanup executes; unique temp filename.
+    end
+end
+
+function stopSampler(f)
+    fid=fopen(f,'w');
+    if fid>=0, fclose(fid); end
+end
+
+function y=applyLh3DMatrixFree(v,J,L,D,lambda)
+% Exactly the original 7-point 3D centered difference with homogeneous
+% Dirichlet boundary (no periodic wrapping, no physical boundary nodes).
+    m=J-1;
+    dx=L/J;
+    a=D/dx^2;
+    U=reshape(v,[m,m,m]);
+    V=(lambda-6*a)*U;
+    V(2:m,:,:)   = V(2:m,:,:)   + a*U(1:m-1,:,:);
+    V(1:m-1,:,:) = V(1:m-1,:,:) + a*U(2:m,:,:);
+    V(:,2:m,:)   = V(:,2:m,:)   + a*U(:,1:m-1,:);
+    V(:,1:m-1,:) = V(:,1:m-1,:) + a*U(:,2:m,:);
+    V(:,:,2:m)   = V(:,:,2:m)   + a*U(:,:,1:m-1);
+    V(:,:,1:m-1) = V(:,:,1:m-1) + a*U(:,:,2:m);
+    y=V(:);
+end
+
+function y=fineRK4Linear3DMatrixFree(v,J,L,D,lambda,dt,nSteps)
+% Classical RK4 with the original SEMIDISCRETE Lh, applied matrix-free.
+    y=v(:);
+    for step=1:nSteps
+        k1=applyLh3DMatrixFree(y,J,L,D,lambda);
+        k2=applyLh3DMatrixFree(y+0.5*dt*k1,J,L,D,lambda);
+        k3=applyLh3DMatrixFree(y+0.5*dt*k2,J,L,D,lambda);
+        k4=applyLh3DMatrixFree(y+dt*k3,J,L,D,lambda);
+        y=y+(dt/6)*(k1+2*k2+2*k3+k4);
+    end
+    if any(~isfinite(y))
+        error('Matrix-free RK4 produced NaN or Inf.');
+    end
+end
+
+function solver=buildDSTSolver3D(J,L,D,lambda,DeltaT)
+% Original DST-I BE implementation from the provided program.
+    m=J-1;
+    h=L/J;
+    p=(1:m)';
+    alpha=(4*D/h^2)*sin(pi*p/(2*J)).^2;
+    denom=1-DeltaT*lambda + DeltaT*( ...
+        reshape(alpha,[m,1,1])+reshape(alpha,[1,m,1]) ...
+        +reshape(alpha,[1,1,m]));
+    if any(denom(:)<=0)
+        error('BE matrix is not SPD; DST denominator must be positive.');
+    end
+    solver.m=m;
+    solver.denom=denom;
+    solver.inverseScale=(2/J)^3;
+end
+
+function y=coarseBackwardEulerLinear3D(v,solver)
+% Original DST-I factorization of backward Euler inversion.
+    U=reshape(v,[solver.m,solver.m,solver.m]);
+    U=dst1fft3D(U,1);
+    U=dst1fft3D(U,2);
+    U=dst1fft3D(U,3);
+    U=U./solver.denom;
+    U=dst1fft3D(U,1);
+    U=dst1fft3D(U,2);
+    U=dst1fft3D(U,3);
+    y=U(:)*solver.inverseScale;
+end
+
+function Y=dst1fft3D(X,dim)
+% Unscaled first-kind discrete sine transform (DST-I), via FFT.
+    nd=ndims(X);
+    order=[dim,1:dim-1,dim+1:nd];
+    A=permute(X,order);
+    sz=size(A);
+    m=sz(1);
+    A=reshape(A,m,[]);
+    Z=[zeros(1,size(A,2)); A; ...
+       zeros(1,size(A,2)); -flipud(A)];
+    F=fft(Z,[],1);
+    B=-imag(F(2:m+1,:))/2;
+    Y=ipermute(reshape(B,sz),order);
+end
+
+function y=sequentialCoarseDST3D(u0,solver,N)
+    y=u0(:);
+    for n=1:N
+        y=coarseBackwardEulerLinear3D(y,solver);
+    end
+end
+
+function [uFinal,stage]=runPararealLinear3D_DST_MemoryEfficient( ...
+    u0,J,L,D,lambda,Gsolver,N,M,dt,K)
+% Equivalent to the ORIGINAL cached-G Parareal implementation, but performs
+% correction IN PLACE to avoid TWO extra (ndof-by-N) arrays at J=160.
+%
+% At the beginning of iteration k:
+%     U(:,n) holds old Parareal node U_n^k;
+%     Gold(:,n) holds G(U_n^k).
+% AFTER all fine tasks F(U_n^k) finish:
+%     scan n in ascending order and overwrite U(:,n+1) with U_n^{k+1};
+%     overwrite Gold(:,n) with G(U_n^{k+1}).
+% No old U(:,n+1) value is required by the sequential correction, because
+% all fine propagation has already completed and old G is cached.
+    ndof=numel(u0);
+    U=zeros(ndof,N+1);
+    Gold=zeros(ndof,N);
+    U(:,1)=u0(:);
+
+    stage.initialCoarse_s=0;
+    stage.fine_s=zeros(K,1);
+    stage.correction_s=zeros(K,1);
+
+    tInitial=tic;
+    for n=1:N
+        g=coarseBackwardEulerLinear3D(U(:,n),Gsolver);
+        Gold(:,n)=g;
+        U(:,n+1)=g;
+    end
+    stage.initialCoarse_s=toc(tInitial);
+
+    for k=1:K
+        FineOld=zeros(ndof,N);
+        tFine=tic;
+        parfor n=1:N
+            FineOld(:,n)=fineRK4Linear3DMatrixFree( ...
+                U(:,n),J,L,D,lambda,dt,M);
+        end
+        stage.fine_s(k)=toc(tFine);
+
+        tCorr=tic;
+        for n=1:N
+            gNew=coarseBackwardEulerLinear3D(U(:,n),Gsolver);
+            U(:,n+1)=gNew+FineOld(:,n)-Gold(:,n);
+            Gold(:,n)=gNew;
+        end
+        stage.correction_s(k)=toc(tCorr);
+    end
+
+    uFinal=U(:,end);
+    if any(~isfinite(uFinal))
+        error('Nonfinite 3D Parareal final result.');
+    end
+end
+
+function E=relativeError(u,v)
+    E=norm(u(:)-v(:))/max(norm(v(:)),eps);
+end
+
