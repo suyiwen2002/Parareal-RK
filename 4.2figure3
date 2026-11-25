@@ -1,0 +1,864 @@
+%% AllenCahn_Parareal_3D_Error_reference_style.m
+%
+% Space-time pointwise error of the Parareal-RK method
+% for the Allen-Cahn equation
+%
+%   u_t = epsilon^2*u_xx + u - u^3,
+%         0 < x < 1, 0 < t <= T
+%
+%   u(0,t) = u(1,t) = 0
+%
+% Initial condition:
+%
+%   u(x,0) = 0.8*sin(2*pi*x)
+%
+% Coarse propagator : Backward Euler, p = 1
+% Fine propagator   : Classical RK4, q = 4
+%
+% The program plots the pointwise errors
+%
+%   |U_n^(k) - U_ref(T_n)|,   k = 0,1,2,3,
+%
+% at the Parareal coarse time nodes T_n.
+%
+% Four INDEPENDENT 3D figures are generated, one for each k.
+% The vertical coordinate is the ACTUAL pointwise error
+% |e^(k)(x,t)|, not log10(error).
+%
+% The z-axis is linear and MATLAB scientific notation is used,
+% e.g. x10^{-3}, x10^{-5}, ...
+%
+% Each iteration uses its own z-axis scale so that the surface
+% remains clearly visible after the error decreases by several
+% orders of magnitude.
+%
+% -------------------------------------------------------------------------
+
+clear;
+clc;
+close all;
+
+format long e;
+
+%% ========================================================================
+%  PARAMETERS
+%  ========================================================================
+
+% ------------------------------------------------------------------------
+% Physical parameters
+% ------------------------------------------------------------------------
+
+L = 1.0;
+T = 1.0;
+
+epsilon = 0.1;
+diffusionCoeff = epsilon^2;
+
+% ------------------------------------------------------------------------
+% Spatial grid
+% ------------------------------------------------------------------------
+
+J = 40;
+h = L/J;
+
+x = linspace(0,L,J+1).';
+xInterior = x(2:end-1);
+
+ndof = J-1;
+
+% ------------------------------------------------------------------------
+% Parareal parameters
+% ------------------------------------------------------------------------
+
+N = 20;
+Mfine = 5;
+K = 3;
+
+DeltaT = T/N;
+deltat = DeltaT/Mfine;
+
+% ------------------------------------------------------------------------
+% Reference solution
+%
+% These values are consistent with the final Allen-Cahn temporal
+% convergence program used for the current table:
+%
+%   NrefGrid   = 160
+%   MrefCoarse = 20
+%   MrefFine   = 50
+%
+% Therefore:
+%
+%   dt_ref,1 = 1/(160*20) = 3.125e-4
+%   dt_ref,2 = 1/(160*50) = 1.25e-4
+%
+% The finer serial RK4 solution is used as U_ref.
+% ------------------------------------------------------------------------
+
+% NrefGrid = 160;
+NrefGrid = 320;
+MrefCoarse = 20;
+MrefFine = 50;
+
+dtRefCoarse = T/(NrefGrid*MrefCoarse);
+dtRefFine = T/(NrefGrid*MrefFine);
+
+% ------------------------------------------------------------------------
+% Newton iteration for backward Euler
+% ------------------------------------------------------------------------
+
+newtonTol = 1.0e-12;
+newtonMaxit = 40;
+
+% ------------------------------------------------------------------------
+% Figure output
+% ------------------------------------------------------------------------
+
+saveFigure = true;
+
+%% ========================================================================
+%  ALLEN-CAHN NONLINEARITY
+%  ========================================================================
+
+% f(u) = u - u^3
+reaction = @(u) ...
+    u - u.^3;
+
+% f'(u) = 1 - 3u^2
+reactionPrime = @(u) ...
+    1.0 - 3.0*u.^2;
+
+%% ========================================================================
+%  INITIAL CONDITION
+%  ========================================================================
+
+u0 = ...
+    0.8*sin(2.0*pi*xInterior);
+
+%% ========================================================================
+%  SPATIAL SEMI-DISCRETIZATION
+%  ========================================================================
+
+e = ones(ndof,1);
+
+A0 = spdiags( ...
+    [e -2.0*e e], ...
+    [-1 0 1], ...
+    ndof, ...
+    ndof);
+
+Ah = ...
+    (diffusionCoeff/h^2)*A0;
+
+rhoAh = ...
+    max(abs(eig(full(Ah))));
+
+%% ========================================================================
+%  BASIC INFORMATION
+%  ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('ALLEN-CAHN PARAREAL SPACE-TIME ERROR EXPERIMENT\n');
+fprintf('====================================================================\n');
+
+fprintf('epsilon            = %.8e\n',epsilon);
+fprintf('epsilon^2          = %.8e\n',diffusionCoeff);
+fprintf('T                  = %.8e\n',T);
+
+fprintf('\n');
+
+fprintf('J                  = %d\n',J);
+fprintf('h                  = %.8e\n',h);
+fprintf('Unknowns           = %d\n',ndof);
+
+fprintf('\n');
+
+fprintf('Coarse method      = Backward Euler\n');
+fprintf('p                  = 1\n');
+fprintf('Fine method        = Classical RK4\n');
+fprintf('q                  = 4\n');
+
+fprintf('\n');
+
+fprintf('N                  = %d\n',N);
+fprintf('DeltaT             = %.12e\n',DeltaT);
+fprintf('Mfine              = %d\n',Mfine);
+fprintf('deltat             = %.12e\n',deltat);
+
+fprintf('\n');
+
+fprintf('rho(-Ah)           = %.12e\n',rhoAh);
+fprintf('deltat*rho(-Ah)    = %.12e\n',deltat*rhoAh);
+
+fprintf('\n');
+
+fprintf('NrefGrid           = %d\n',NrefGrid);
+fprintf('MrefCoarse         = %d\n',MrefCoarse);
+fprintf('Reference dt #1    = %.12e\n',dtRefCoarse);
+fprintf('MrefFine           = %d\n',MrefFine);
+fprintf('Reference dt #2    = %.12e\n',dtRefFine);
+
+fprintf('====================================================================\n');
+
+% Classical RK4 negative-real-axis stability boundary is about 2.785.
+if deltat*rhoAh >= 2.785
+
+    warning([ ...
+        'The selected fine time step may violate the classical RK4 ', ...
+        'diffusion stability restriction.' ...
+        ]);
+
+end
+
+%% ========================================================================
+%  HIGH-ACCURACY SERIAL RK4 REFERENCE
+%  ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('REFERENCE SELF-CONVERGENCE CHECK\n');
+fprintf('====================================================================\n');
+
+Tref = ...
+    linspace(0,T,NrefGrid+1).';
+
+% ------------------------------------------------------------------------
+% Reference #1
+% ------------------------------------------------------------------------
+
+timerRef1 = tic;
+
+UrefCoarse = ...
+    serialRK4ReferenceAtNodes( ...
+    Tref, ...
+    u0, ...
+    Ah, ...
+    reaction, ...
+    MrefCoarse);
+
+timeRef1 = ...
+    toc(timerRef1);
+
+% ------------------------------------------------------------------------
+% Reference #2
+% ------------------------------------------------------------------------
+
+timerRef2 = tic;
+
+UrefFine = ...
+    serialRK4ReferenceAtNodes( ...
+    Tref, ...
+    u0, ...
+    Ah, ...
+    reaction, ...
+    MrefFine);
+
+timeRef2 = ...
+    toc(timerRef2);
+
+% ------------------------------------------------------------------------
+% Reference self-convergence
+% ------------------------------------------------------------------------
+
+refDiff = ...
+    rowGridNorm( ...
+    UrefFine-UrefCoarse, ...
+    h);
+
+refSelfMax = ...
+    max(refDiff);
+
+refSelfEnd = ...
+    refDiff(end);
+
+fprintf('Max reference difference    = %.12e\n',refSelfMax);
+fprintf('Final reference difference  = %.12e\n',refSelfEnd);
+fprintf('Reference runtime #1        = %.6f s\n',timeRef1);
+fprintf('Reference runtime #2        = %.6f s\n',timeRef2);
+fprintf('Actual reference            = finer serial RK4 reference\n');
+
+fprintf('====================================================================\n');
+
+%% ========================================================================
+%  EXTRACT REFERENCE AT THE PARAREAL COARSE TIME NODES
+%  ========================================================================
+
+ratio = ...
+    NrefGrid/N;
+
+if abs(ratio-round(ratio)) > 1.0e-12
+
+    error('N must divide NrefGrid exactly.');
+
+end
+
+ratio = ...
+    round(ratio);
+
+referenceIndices = ...
+    1:ratio:(NrefGrid+1);
+
+UrefN = ...
+    UrefFine(referenceIndices,:);
+
+tCoarse = ...
+    linspace(0,T,N+1).';
+
+%% ========================================================================
+%  PARAREAL: BACKWARD EULER + RK4
+%  ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('PARAREAL ITERATIONS\n');
+fprintf('====================================================================\n');
+
+timerParareal = tic;
+
+Uhist = ...
+    runPararealBE_RK4( ...
+    u0, ...
+    Ah, ...
+    reaction, ...
+    reactionPrime, ...
+    T, ...
+    N, ...
+    Mfine, ...
+    K, ...
+    newtonTol, ...
+    newtonMaxit);
+
+pararealTime = ...
+    toc(timerParareal);
+
+fprintf('Parareal runtime = %.6f s\n',pararealTime);
+fprintf('====================================================================\n');
+
+%% ========================================================================
+%  ERROR ANALYSIS
+%  ========================================================================
+
+pointwiseError = ...
+    cell(K+1,1);
+
+l2Error = ...
+    cell(K+1,1);
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('ERROR RELATIVE TO THE HIGH-ACCURACY REFERENCE\n');
+fprintf('====================================================================\n');
+
+fprintf(' k       Max-in-time L2 error       Final-time L2 error\n');
+fprintf('--------------------------------------------------------------------\n');
+
+for k = 0:K
+
+    Uk = ...
+        Uhist{k+1};
+
+    % Pointwise absolute error at all coarse time nodes
+    pointwiseError{k+1} = ...
+        abs(Uk-UrefN);
+
+    % Discrete L2 error at each coarse time node
+    l2Error{k+1} = ...
+        rowGridNorm( ...
+        Uk-UrefN, ...
+        h);
+
+    fprintf( ...
+        '%2d       %16.10e          %16.10e\n', ...
+        k, ...
+        max(l2Error{k+1}), ...
+        l2Error{k+1}(end));
+
+end
+
+fprintf('====================================================================\n');
+
+%% ========================================================================
+%  FOUR INDEPENDENT 3D ERROR SURFACES
+%  ========================================================================
+%
+% The ACTUAL pointwise error is plotted on a LINEAR z-axis.
+%
+% MATLAB scientific notation is used automatically on the vertical axis:
+%
+%       x10^{-m}
+%
+% Each k has its own z-axis range because the error decreases by several
+% orders of magnitude from k=0 to k=3.
+% ========================================================================
+
+[Xgrid,Tgrid] = ...
+    meshgrid( ...
+    xInterior, ...
+    tCoarse);
+
+for k = 0:K
+
+    % --------------------------------------------------------------------
+    % Actual pointwise error
+    % --------------------------------------------------------------------
+
+    Eplot = ...
+        pointwiseError{k+1};
+
+    zMax = ...
+        max(Eplot,[],'all');
+
+    if zMax <= 0
+
+        zMax = ...
+            eps;
+
+    end
+
+    % Add a small amount of headroom.
+    zUpper = ...
+        1.12*zMax;
+
+    % Scientific-notation exponent.
+    %
+    % Examples:
+    %   8.0e-4 -> exponent = -4
+    %   3.0e-5 -> exponent = -5
+    exponent = ...
+        floor(log10(zMax));
+
+    % --------------------------------------------------------------------
+    % Independent figure
+    % --------------------------------------------------------------------
+
+    fig = ...
+        figure( ...
+        'Color','w', ...
+        'Position',[ ...
+        140+45*k ...
+        90+30*k ...
+        720 ...
+        560]);
+
+    ax = ...
+        axes( ...
+        'Parent',fig);
+
+    surf( ...
+        ax, ...
+        Xgrid, ...
+        Tgrid, ...
+        Eplot, ...
+        Eplot, ...
+        'EdgeColor','none', ...
+        'FaceColor','interp');
+
+    shading(ax,'interp');
+
+    box(ax,'on');
+    grid(ax,'on');
+
+    % Perspective close to the reference style.
+    view(ax,[-42 28]);
+
+    xlim(ax,[0 L]);
+    ylim(ax,[0 T]);
+    zlim(ax,[0 zUpper]);
+
+    % Linear vertical axis.
+    set(ax,'ZScale','linear');
+
+    % Display the z-axis in the form x10^{-m}.
+    ax.ZAxis.Exponent = ...
+        exponent;
+
+    % Clean vertical ticks.
+    zticks( ...
+        ax, ...
+        linspace(0,zUpper,5));
+
+    % --------------------------------------------------------------------
+    % Axes labels
+    % --------------------------------------------------------------------
+
+    xlabel( ...
+        ax, ...
+        '$x$', ...
+        'Interpreter','latex', ...
+        'FontSize',13);
+
+    ylabel( ...
+        ax, ...
+        '$t$', ...
+        'Interpreter','latex', ...
+        'FontSize',13);
+
+    zlabel( ...
+        ax, ...
+        '$|e^{(k)}(x,t)|$', ...
+        'Interpreter','latex', ...
+        'FontSize',13);
+
+    title( ...
+        ax, ...
+        sprintf('$k=%d$',k), ...
+        'Interpreter','latex', ...
+        'FontSize',13, ...
+        'FontWeight','normal');
+
+    % --------------------------------------------------------------------
+    % Axes appearance
+    % --------------------------------------------------------------------
+
+    set( ...
+        ax, ...
+        'FontSize',11, ...
+        'LineWidth',1.0, ...
+        'TickLabelInterpreter','latex', ...
+        'GridLineStyle',':', ...
+        'GridAlpha',0.45, ...
+        'XGrid','on', ...
+        'YGrid','on', ...
+        'ZGrid','on');
+
+    % Reference-style surface coloring.
+    colormap(fig,jet(256));
+
+    caxis(ax,[0 zUpper]);
+
+    % No colorbar is used. The vertical axis already gives the physical
+    % magnitude of the error and the figure remains cleaner.
+
+    % --------------------------------------------------------------------
+    % Save each k as a separate figure
+    % --------------------------------------------------------------------
+
+    if saveFigure
+
+        pngName = ...
+            sprintf( ...
+            'AllenCahn_Parareal_error_surface_k%d.png', ...
+            k);
+
+        pdfName = ...
+            sprintf( ...
+            'AllenCahn_Parareal_error_surface_k%d.pdf', ...
+            k);
+
+        exportgraphics( ...
+            fig, ...
+            pngName, ...
+            'Resolution',600);
+
+        exportgraphics( ...
+            fig, ...
+            pdfName, ...
+            'ContentType','image', ...
+            'Resolution',600);
+
+    end
+
+end
+
+%% ========================================================================
+%  LOCAL FUNCTIONS
+%  ========================================================================
+
+function U = serialRK4ReferenceAtNodes( ...
+    Tnodes,u0,A,f,Mref)
+% High-accuracy serial classical RK4 solution.
+%
+% Exactly Mref RK4 steps are taken between consecutive output nodes.
+
+    Tnodes = ...
+        Tnodes(:);
+
+    nOut = ...
+        numel(Tnodes);
+
+    ndof = ...
+        numel(u0);
+
+    U = ...
+        zeros(nOut,ndof);
+
+    U(1,:) = ...
+        u0(:).';
+
+    y = ...
+        u0(:);
+
+    for n = 1:nOut-1
+
+        intervalLength = ...
+            Tnodes(n+1)-Tnodes(n);
+
+        dt = ...
+            intervalLength/Mref;
+
+        for m = 1:Mref
+
+            y = ...
+                rk4Step( ...
+                y,A,f,dt);
+
+        end
+
+        U(n+1,:) = ...
+            y.';
+
+    end
+
+end
+
+function Uhist = runPararealBE_RK4( ...
+    u0,A,f,fp,T,N,Mfine,K,newtonTol,newtonMaxit)
+% Classical Parareal iteration:
+%
+%   U_{n+1}^{k+1}
+%     = G(U_n^{k+1})
+%       + F(U_n^k)
+%       - G(U_n^k)
+%
+% G = Backward Euler
+% F = Mfine classical RK4 steps
+
+    ndof = ...
+        numel(u0);
+
+    DeltaT = ...
+        T/N;
+
+    Uhist = ...
+        cell(K+1,1);
+
+    % --------------------------------------------------------------------
+    % Initial coarse prediction: k = 0
+    % --------------------------------------------------------------------
+
+    U0 = ...
+        zeros(N+1,ndof);
+
+    U0(1,:) = ...
+        u0(:).';
+
+    for n = 1:N
+
+        v = ...
+            U0(n,:).';
+
+        y = ...
+            backwardEulerStep( ...
+            v,A,f,fp,DeltaT,newtonTol,newtonMaxit);
+
+        U0(n+1,:) = ...
+            y.';
+
+    end
+
+    Uhist{1} = ...
+        U0;
+
+    % --------------------------------------------------------------------
+    % Parareal corrections
+    % --------------------------------------------------------------------
+
+    for k = 0:K-1
+
+        fprintf('Parareal correction %d / %d\n', ...
+            k+1,K);
+
+        Uold = ...
+            Uhist{k+1};
+
+        % ---------------------------------------------------------------
+        % Fine propagation from the old iteration
+        % ---------------------------------------------------------------
+
+        Fvalue = ...
+            zeros(N+1,ndof);
+
+        Fvalue(1,:) = ...
+            Uold(1,:);
+
+        for n = 1:N
+
+            vOld = ...
+                Uold(n,:).';
+
+            yFine = ...
+                finePropRK4( ...
+                vOld,A,f,DeltaT,Mfine);
+
+            Fvalue(n+1,:) = ...
+                yFine.';
+
+        end
+
+        % ---------------------------------------------------------------
+        % Sequential Parareal correction
+        % ---------------------------------------------------------------
+
+        Unew = ...
+            zeros(N+1,ndof);
+
+        Unew(1,:) = ...
+            u0(:).';
+
+        for n = 1:N
+
+            vNew = ...
+                Unew(n,:).';
+
+            vOld = ...
+                Uold(n,:).';
+
+            Gnew = ...
+                backwardEulerStep( ...
+                vNew,A,f,fp,DeltaT,newtonTol,newtonMaxit);
+
+            Gold = ...
+                backwardEulerStep( ...
+                vOld,A,f,fp,DeltaT,newtonTol,newtonMaxit);
+
+            corrected = ...
+                Gnew ...
+                + Fvalue(n+1,:).' ...
+                - Gold;
+
+            Unew(n+1,:) = ...
+                corrected.';
+
+        end
+
+        Uhist{k+2} = ...
+            Unew;
+
+    end
+
+end
+
+function y = finePropRK4( ...
+    v,A,f,DeltaT,Mfine)
+% Fine RK4 propagator over one coarse time interval.
+
+    dt = ...
+        DeltaT/Mfine;
+
+    y = ...
+        v(:);
+
+    for m = 1:Mfine
+
+        y = ...
+            rk4Step( ...
+            y,A,f,dt);
+
+    end
+
+end
+
+function y = rk4Step( ...
+    v,A,f,dt)
+% One step of the classical fourth-order Runge-Kutta method.
+
+    v = ...
+        v(:);
+
+    g = @(w) ...
+        A*w + f(w);
+
+    k1 = ...
+        g(v);
+
+    k2 = ...
+        g( ...
+        v + 0.5*dt*k1);
+
+    k3 = ...
+        g( ...
+        v + 0.5*dt*k2);
+
+    k4 = ...
+        g( ...
+        v + dt*k3);
+
+    y = ...
+        v ...
+        + (dt/6.0) .* ...
+        (k1 + 2.0*k2 + 2.0*k3 + k4);
+
+end
+
+function y = backwardEulerStep( ...
+    v,A,f,fp,dt,tol,maxit)
+% One backward Euler step:
+%
+%   y = v + dt*(A*y + f(y))
+%
+% solved by Newton iteration.
+
+    v = ...
+        v(:);
+
+    y = ...
+        v;
+
+    n = ...
+        numel(v);
+
+    I = ...
+        speye(n);
+
+    for it = 1:maxit
+
+        residual = ...
+            y ...
+            - v ...
+            - dt*( ...
+            A*y ...
+            + f(y));
+
+        J = ...
+            I ...
+            - dt*( ...
+            A ...
+            + spdiags( ...
+            fp(y), ...
+            0, ...
+            n, ...
+            n));
+
+        delta = ...
+            -J\residual;
+
+        y = ...
+            y + delta;
+
+        if norm(delta,inf) <= ...
+                tol*(1.0+norm(y,inf))
+
+            return;
+
+        end
+
+    end
+
+    warning( ...
+        'Backward Euler Newton iteration reached maxit = %d.', ...
+        maxit);
+
+end
+
+function values = rowGridNorm( ...
+    U,h)
+% Discrete L2 norm of each row:
+%
+%   ||U||_h = sqrt(h * sum_j U_j^2).
+
+    values = ...
+        sqrt( ...
+        h .* sum(U.^2,2));
+
+end
