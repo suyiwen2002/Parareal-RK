@@ -1,0 +1,2085 @@
+%% FisherKPP2D_Parareal_BE_FixedPoint.m
+%
+% ========================================================================
+% 2D FISHER-KPP EQUATION
+% ========================================================================
+%
+%   u_t = D*(u_xx + u_yy) + r*u*(1-u),
+%   (x,y) in (0,L)^2, 0 < t <= T.
+%
+% Homogeneous Dirichlet boundary conditions:
+%
+%   u = 0 on boundary.
+%
+% Initial condition:
+%
+%   u0(x,y) =
+%       exp(-alpha*((x-L/2)^2 + (y-L/2)^2)).
+%
+% ========================================================================
+% PARAREAL
+% ========================================================================
+%
+% Coarse propagator:
+%
+%   Fully implicit Backward Euler
+%
+%       U_{n+1} - U_n
+%       - DeltaT*[A*U_{n+1} + r*U_{n+1}.*(1-U_{n+1})] = 0.
+%
+% IMPORTANT:
+% The Backward Euler discretization is NOT changed.
+%
+% The nonlinear BE algebraic system is solved by fixed-point iteration:
+%
+%   (I - DeltaT*A)*y^(m+1)
+%       = v + DeltaT*r*y^(m).*(1-y^(m)).
+%
+% At convergence this satisfies exactly the fully implicit BE equation.
+%
+% The matrix
+%
+%       B = I - DeltaT*A
+%
+% is constant. Therefore its sparse LU factorization is computed ONCE
+% and reused for all:
+%
+%   - coarse intervals,
+%   - Parareal iterations,
+%   - fixed-point iterations.
+%
+% Fine propagator:
+%
+%   Classical fourth-order Runge-Kutta (RK4).
+%
+% ========================================================================
+% TIMING
+% ========================================================================
+%
+% For EACH K:
+%
+%   1. Serial fine RK4 is independently timed nRepeats times.
+%   2. Parareal is independently timed nRepeats times.
+%   3. Median times are reported.
+%
+% Pool startup, factorization, and warm-up are excluded.
+%
+% ========================================================================
+
+clear;
+clc;
+close all;
+
+%% ========================================================================
+% PARAMETERS
+% ========================================================================
+
+% Spatial domain
+L = 1.0;
+
+% Final time
+T = 5.0;
+
+% Fisher-KPP parameters
+D = 1.0e-2;
+r = 1.0;
+
+% Spatial mesh
+J = 80;
+
+% Number of coarse time intervals
+N = 40;
+
+% Fine RK4 steps per coarse interval
+Mfine = 1024;
+
+% Parareal iterations
+Klist = [1 2 3];
+
+% Independent timing repetitions
+nRepeats = 3;
+
+% Gaussian initial condition
+alpha = 100.0;
+
+% ------------------------------------------------------------------------
+% Fixed-point solver parameters for fully implicit BE
+% ------------------------------------------------------------------------
+
+% Residual tolerance for the ORIGINAL BE equation
+fpTol = 1.0e-10;
+
+% Maximum fixed-point iterations
+fpMaxit = 100;
+
+% Use forward Euler predictor as initial guess?
+%
+% true:
+%   y0 = v + DeltaT*(A*v + f(v))
+%
+% false:
+%   y0 = v
+%
+% Predictor only provides the initial guess.
+% It does NOT change the BE discretization.
+usePredictor = true;
+
+% Save CSV tables
+saveResults = true;
+
+%% ========================================================================
+% SPATIAL GRID
+% ========================================================================
+
+h = L/J;
+
+x = linspace(0,L,J+1).';
+y = linspace(0,L,J+1).';
+
+xInterior = x(2:end-1);
+yInterior = y(2:end-1);
+
+nx = J-1;
+ny = J-1;
+
+ndof = nx*ny;
+
+[Xint,Yint] = meshgrid(xInterior,yInterior);
+
+%% ========================================================================
+% INITIAL CONDITION
+% ========================================================================
+
+u0Grid = ...
+    exp( ...
+        -alpha*( ...
+            (Xint-L/2).^2 ...
+            + (Yint-L/2).^2 ...
+        ) ...
+    );
+
+u0 = u0Grid(:);
+
+%% ========================================================================
+% 2D DIFFUSION MATRIX
+% ========================================================================
+
+Ah = ...
+    buildDiffusionMatrix2D( ...
+        J,L,D);
+
+Ih = speye(ndof);
+
+%% ========================================================================
+% TIME PARAMETERS
+% ========================================================================
+
+DeltaT = T/N;
+
+deltat = DeltaT/Mfine;
+
+%% ========================================================================
+% FIXED MATRIX FOR BACKWARD EULER FIXED-POINT ITERATION
+% ========================================================================
+%
+% Fixed-point equation:
+%
+%   (I - DeltaT*A)*y_(m+1)
+%       = v + DeltaT*r*y_m.*(1-y_m).
+%
+% Therefore
+%
+%   B = I - DeltaT*A
+%
+% is constant.
+% ========================================================================
+
+BEFixedMatrix = ...
+    Ih ...
+    - DeltaT*Ah;
+
+fprintf('\n');
+fprintf('Factorizing fixed BE matrix once...\n');
+
+factorTimer = tic;
+
+BEFixedSolver = ...
+    decomposition( ...
+        BEFixedMatrix, ...
+        'lu');
+
+BEFactorizationTime = toc(factorTimer);
+
+fprintf('Fixed BE matrix factorization time = %.8f s\n', ...
+    BEFactorizationTime);
+
+fprintf('Factorization is excluded from propagation timings.\n');
+
+%% ========================================================================
+% RK4 STABILITY INFORMATION
+% ========================================================================
+
+rhoMinusAh = ...
+    8.0*D/h^2 ...
+    * cos(pi/(2.0*J))^2;
+
+% For Fisher-KPP, diffusion is the stiff component.
+% This quantity is used as a practical diffusion stability diagnostic.
+
+stabilityNumber = ...
+    deltat*rhoMinusAh;
+
+%% ========================================================================
+% BASIC INFORMATION
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('2D FISHER-KPP PARAREAL PERFORMANCE TEST\n');
+fprintf('FIXED-LU FULLY IMPLICIT BACKWARD EULER COARSE SOLVER\n');
+fprintf('====================================================================\n');
+
+fprintf('Equation                        : u_t = D*Delta(u) + r*u*(1-u)\n');
+
+fprintf('Domain                          = [0,%.2f]^2\n',L);
+
+fprintf('Final time T                    = %.8e\n',T);
+
+fprintf('\n');
+
+fprintf('Diffusion coefficient D         = %.8e\n',D);
+
+fprintf('Reaction rate r                 = %.8e\n',r);
+
+fprintf('\n');
+
+fprintf('J in each spatial direction     = %d\n',J);
+
+fprintf('Interior grid size              = %d x %d\n',nx,ny);
+
+fprintf('Number of unknowns              = %d\n',ndof);
+
+fprintf('h                               = %.8e\n',h);
+
+fprintf('\n');
+
+fprintf('Gaussian alpha                  = %.8e\n',alpha);
+
+fprintf('Initial maximum                 = %.8e\n',max(u0));
+
+fprintf('Initial minimum                 = %.8e\n',min(u0));
+
+fprintf('\n');
+
+fprintf('N                               = %d\n',N);
+
+fprintf('DeltaT                          = %.8e\n',DeltaT);
+
+fprintf('Mfine                           = %d\n',Mfine);
+
+fprintf('Fine RK4 step deltat            = %.8e\n',deltat);
+
+fprintf('Total serial RK4 steps          = %d\n',N*Mfine);
+
+fprintf('\n');
+
+fprintf('Parareal iterations tested      = ');
+
+fprintf('%d ',Klist);
+
+fprintf('\n\n');
+
+fprintf('Coarse propagator               = fully implicit Backward Euler\n');
+
+fprintf('BE nonlinear solver             = fixed-point iteration\n');
+
+fprintf('BE linear algebra               = one fixed sparse LU factorization\n');
+
+fprintf('Fine propagator                 = classical RK4\n');
+
+fprintf('\n');
+
+fprintf('Fixed-point residual tolerance  = %.3e\n',fpTol);
+
+fprintf('Fixed-point maximum iterations  = %d\n',fpMaxit);
+
+fprintf('Forward Euler predictor         = %d\n',usePredictor);
+
+fprintf('\n');
+
+fprintf('rho(-Ah)                        = %.8e\n',rhoMinusAh);
+
+fprintf('deltat*rho(-Ah)                 = %.8e\n',stabilityNumber);
+
+fprintf('RK4 diffusion stability guide   : deltat*rho(-Ah) < about 2.785\n');
+
+fprintf('\n');
+
+fprintf('BE fixed matrix factorization   = %.8f s\n', ...
+    BEFactorizationTime);
+
+fprintf('Factorization excluded from timing.\n');
+
+fprintf('====================================================================\n');
+
+if stabilityNumber >= 2.785
+
+    error( ...
+        ['Fine RK4 may be unstable. ', ...
+         'Increase Mfine, increase N, or decrease J.']);
+
+end
+
+%% ========================================================================
+% PARALLEL POOL
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('PARALLEL POOL INFORMATION\n');
+fprintf('====================================================================\n');
+
+if ~license('test','Distrib_Computing_Toolbox')
+
+    error('Parallel Computing Toolbox is required.');
+
+end
+
+localCluster = parcluster('local');
+
+maxWorkers = localCluster.NumWorkers;
+
+fprintf('Maximum available workers       = %d\n',maxWorkers);
+
+pool = gcp('nocreate');
+
+if isempty(pool)
+
+    fprintf('No parallel pool is currently open.\n');
+
+    fprintf('Starting a pool with %d workers...\n',maxWorkers);
+
+    pool = parpool('local',maxWorkers);
+
+else
+
+    fprintf('Existing parallel pool found.\n');
+
+    fprintf('Current pool workers            = %d\n',pool.NumWorkers);
+
+    if pool.NumWorkers == maxWorkers
+
+        fprintf('The existing pool already uses the maximum number of workers.\n');
+
+        fprintf('The pool will NOT be restarted.\n');
+
+    else
+
+        fprintf( ...
+            ['WARNING: existing pool has %d workers, ', ...
+             'maximum available is %d.\n'], ...
+            pool.NumWorkers, ...
+            maxWorkers);
+
+        fprintf('The existing pool will NOT be restarted automatically.\n');
+
+    end
+
+end
+
+nWorkers = pool.NumWorkers;
+
+fprintf('\n');
+
+fprintf('Workers used by Parareal        = %d\n',nWorkers);
+
+fprintf('====================================================================\n');
+
+%% ========================================================================
+% SERIAL THREAD SETTING
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('SERIAL BASELINE THREAD SETTING\n');
+fprintf('====================================================================\n');
+
+originalClientThreads = maxNumCompThreads;
+
+fprintf('Original client thread limit    = %d\n',originalClientThreads);
+
+maxNumCompThreads(1);
+
+fprintf('Client threads during test      = %d\n',maxNumCompThreads);
+
+fprintf('====================================================================\n');
+
+try
+
+%% ========================================================================
+% TEST THE BE SOLVER BEFORE TIMING
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('BACKWARD EULER FIXED-POINT SOLVER TEST\n');
+fprintf('====================================================================\n');
+
+[yTest,testInfo] = ...
+    coarseBackwardEulerFisherFixedPoint( ...
+        u0, ...
+        Ah, ...
+        r, ...
+        DeltaT, ...
+        BEFixedSolver, ...
+        fpTol, ...
+        fpMaxit, ...
+        usePredictor);
+
+fprintf('Test converged                  = %d\n',testInfo.converged);
+
+fprintf('Test fixed-point iterations     = %d\n',testInfo.iterations);
+
+fprintf('Test final BE residual inf-norm = %.12e\n', ...
+    testInfo.residual);
+
+fprintf('Test solution minimum           = %.12e\n',min(yTest));
+
+fprintf('Test solution maximum           = %.12e\n',max(yTest));
+
+fprintf('====================================================================\n');
+
+if ~testInfo.converged
+
+    error( ...
+        ['The fixed-point BE solver failed the initial convergence test. ', ...
+         'Do not use performance timings from this run.']);
+
+end
+
+clear yTest testInfo;
+
+%% ========================================================================
+% SERIAL WARM-UP
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('SERIAL WARM-UP\n');
+fprintf('====================================================================\n');
+
+dummyFine = ...
+    finePropRK4Fisher( ...
+        u0, ...
+        Ah, ...
+        r, ...
+        DeltaT, ...
+        Mfine);
+
+[dummyCoarse,dummyInfo] = ...
+    coarseBackwardEulerFisherFixedPoint( ...
+        u0, ...
+        Ah, ...
+        r, ...
+        DeltaT, ...
+        BEFixedSolver, ...
+        fpTol, ...
+        fpMaxit, ...
+        usePredictor);
+
+if ~dummyInfo.converged
+
+    error('BE fixed-point warm-up did not converge.');
+
+end
+
+clear dummyFine dummyCoarse dummyInfo;
+
+fprintf('Serial warm-up completed.\n');
+
+%% ========================================================================
+% PARALLEL WORKER WARM-UP
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('PARALLEL WORKER WARM-UP\n');
+fprintf('====================================================================\n');
+
+warmResult = zeros(nWorkers,1);
+
+parfor iw = 1:nWorkers
+
+    yWarm = ...
+        finePropRK4Fisher( ...
+            u0, ...
+            Ah, ...
+            r, ...
+            DeltaT, ...
+            Mfine);
+
+    warmResult(iw) = yWarm(1);
+
+end
+
+if any(~isfinite(warmResult))
+
+    error('Parallel RK4 warm-up produced NaN or Inf.');
+
+end
+
+clear warmResult;
+
+fprintf('Parallel worker warm-up completed.\n');
+
+fprintf('Warm-up time is NOT included in reported timings.\n');
+
+%% ========================================================================
+% PARAREAL CODE-PATH WARM-UP
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('PARAREAL CODE-PATH WARM-UP\n');
+fprintf('====================================================================\n');
+
+NparWarm = min(N,nWorkers);
+
+TparWarm = NparWarm*DeltaT;
+
+[~,warmTiming] = ...
+    runPararealBE_RK4_ParallelFisherFixedPoint( ...
+        u0, ...
+        Ah, ...
+        r, ...
+        BEFixedSolver, ...
+        TparWarm, ...
+        NparWarm, ...
+        Mfine, ...
+        1, ...
+        fpTol, ...
+        fpMaxit, ...
+        usePredictor);
+
+if warmTiming.failedCoarseSolves > 0
+
+    error('A BE coarse solve failed during Parareal warm-up.');
+
+end
+
+clear warmTiming;
+
+fprintf('Parareal code-path warm-up completed.\n');
+
+fprintf('Warm-up time is NOT included in reported timings.\n');
+
+%% ========================================================================
+% STORAGE
+% ========================================================================
+
+nK = numel(Klist);
+
+TableK = zeros(nK,1);
+
+TableSerialTime = zeros(nK,1);
+
+TablePararealTime = zeros(nK,1);
+
+TableSpeedup = zeros(nK,1);
+
+TableEfficiency = zeros(nK,1);
+
+TableError = zeros(nK,1);
+
+TableRelativeError = zeros(nK,1);
+
+TableMaxError = zeros(nK,1);
+
+TableTimeReduction = zeros(nK,1);
+
+TableInitialCoarse = zeros(nK,1);
+
+TableParallelFine = zeros(nK,1);
+
+TableCorrection = zeros(nK,1);
+
+TableMeanFPIterations = zeros(nK,1);
+
+TableMaxFPIterations = zeros(nK,1);
+
+TableMaxBEResidual = zeros(nK,1);
+
+TableFailedCoarse = zeros(nK,1);
+
+Kplot = max(Klist);
+
+uFineSerialForPlot = [];
+
+uParFinalForPlot = [];
+
+%% ========================================================================
+% INDEPENDENT PERFORMANCE TEST FOR EACH K
+% ========================================================================
+
+for iK = 1:nK
+
+    Kpar = Klist(iK);
+
+    fprintf('\n');
+    fprintf('####################################################################\n');
+    fprintf('INDEPENDENT PERFORMANCE TEST FOR K = %d\n',Kpar);
+    fprintf('####################################################################\n');
+
+    %% ====================================================================
+    % SERIAL FINE RK4
+    % ====================================================================
+
+    fprintf('\n');
+    fprintf('====================================================================\n');
+    fprintf('SERIAL FINE RK4 TIMING FOR K = %d\n',Kpar);
+    fprintf('====================================================================\n');
+
+    fprintf('Client computational threads    = 1\n');
+
+    fprintf('Fine time step deltat           = %.12e\n',deltat);
+
+    fprintf('Total RK4 steps                 = %d\n',N*Mfine);
+
+    fprintf('--------------------------------------------------------------------\n');
+
+    serialTimes = zeros(nRepeats,1);
+
+    uFineSerial = [];
+
+    for iRun = 1:nRepeats
+
+        timerSerial = tic;
+
+        uFineSerial = ...
+            serialFineRK4FinalFisher( ...
+                u0, ...
+                Ah, ...
+                r, ...
+                T, ...
+                N, ...
+                Mfine);
+
+        serialTimes(iRun) = toc(timerSerial);
+
+        fprintf( ...
+            'Serial RK4 K=%d, run %d / %d : %.8f s\n', ...
+            Kpar, ...
+            iRun, ...
+            nRepeats, ...
+            serialTimes(iRun));
+
+    end
+
+    serialTimeMedian = median(serialTimes);
+
+    serialTimeMean = mean(serialTimes);
+
+    serialTimeMin = min(serialTimes);
+
+    fprintf('--------------------------------------------------------------------\n');
+
+    fprintf('Serial RK4 median time          = %.8f s\n', ...
+        serialTimeMedian);
+
+    fprintf('Serial RK4 mean time            = %.8f s\n', ...
+        serialTimeMean);
+
+    fprintf('Serial RK4 minimum time         = %.8f s\n', ...
+        serialTimeMin);
+
+    fprintf('--------------------------------------------------------------------\n');
+
+    if any(~isfinite(uFineSerial))
+
+        error('Serial fine RK4 solution contains NaN or Inf.');
+
+    end
+
+    %% ====================================================================
+    % PARAREAL
+    % ====================================================================
+
+    fprintf('\n');
+    fprintf('====================================================================\n');
+    fprintf('PARAREAL PARALLEL TIMING: K = %d\n',Kpar);
+    fprintf('====================================================================\n');
+
+    fprintf('Number of workers               = %d\n',nWorkers);
+
+    fprintf('Number of corrections K         = %d\n',Kpar);
+
+    fprintf('Number of coarse intervals N    = %d\n',N);
+
+    fprintf('Fine steps per interval         = %d\n',Mfine);
+
+    fprintf('--------------------------------------------------------------------\n');
+
+    pararealTimes = zeros(nRepeats,1);
+
+    initialCoarseTimes = zeros(nRepeats,1);
+
+    totalFineTimes = zeros(nRepeats,1);
+
+    totalCorrectionTimes = zeros(nRepeats,1);
+
+    fineTimesEachRun = zeros(nRepeats,Kpar);
+
+    correctionTimesEachRun = zeros(nRepeats,Kpar);
+
+    meanFPIterationsRuns = zeros(nRepeats,1);
+
+    maxFPIterationsRuns = zeros(nRepeats,1);
+
+    maxBEResidualRuns = zeros(nRepeats,1);
+
+    failedCoarseRuns = zeros(nRepeats,1);
+
+    Upar = [];
+
+    timing = [];
+
+    for iRun = 1:nRepeats
+
+        timerParareal = tic;
+
+        [Upar,timing] = ...
+            runPararealBE_RK4_ParallelFisherFixedPoint( ...
+                u0, ...
+                Ah, ...
+                r, ...
+                BEFixedSolver, ...
+                T, ...
+                N, ...
+                Mfine, ...
+                Kpar, ...
+                fpTol, ...
+                fpMaxit, ...
+                usePredictor);
+
+        pararealTimes(iRun) = toc(timerParareal);
+
+        initialCoarseTimes(iRun) = ...
+            timing.initialCoarse;
+
+        totalFineTimes(iRun) = ...
+            sum(timing.fine);
+
+        totalCorrectionTimes(iRun) = ...
+            sum(timing.correction);
+
+        fineTimesEachRun(iRun,:) = ...
+            timing.fine(:).';
+
+        correctionTimesEachRun(iRun,:) = ...
+            timing.correction(:).';
+
+        meanFPIterationsRuns(iRun) = ...
+            timing.meanFPIterations;
+
+        maxFPIterationsRuns(iRun) = ...
+            timing.maxFPIterations;
+
+        maxBEResidualRuns(iRun) = ...
+            timing.maxBEResidual;
+
+        failedCoarseRuns(iRun) = ...
+            timing.failedCoarseSolves;
+
+        fprintf( ...
+            'Parareal K=%d, run %d / %d : %.8f s\n', ...
+            Kpar, ...
+            iRun, ...
+            nRepeats, ...
+            pararealTimes(iRun));
+
+        fprintf( ...
+            '    mean FP iterations = %.4f, max = %d, max BE residual = %.3e\n', ...
+            timing.meanFPIterations, ...
+            timing.maxFPIterations, ...
+            timing.maxBEResidual);
+
+    end
+
+    %% ====================================================================
+    % CHECK NONLINEAR SOLVER
+    % ====================================================================
+
+    if any(failedCoarseRuns > 0)
+
+        error( ...
+            ['At least one fully implicit BE coarse solve failed ', ...
+             'to satisfy the residual tolerance. ', ...
+             'Do not use these timings.']);
+
+    end
+
+    %% ====================================================================
+    % TIMING STATISTICS
+    % ====================================================================
+
+    pararealTimeMedian = median(pararealTimes);
+
+    pararealTimeMean = mean(pararealTimes);
+
+    pararealTimeMin = min(pararealTimes);
+
+    initialCoarseTime = median(initialCoarseTimes);
+
+    parallelFineTime = median(totalFineTimes);
+
+    serialCorrectionTime = median(totalCorrectionTimes);
+
+    fineIterationTime = ...
+        median(fineTimesEachRun,1);
+
+    correctionIterationTime = ...
+        median(correctionTimesEachRun,1);
+
+    meanFPIterations = ...
+        median(meanFPIterationsRuns);
+
+    maxFPIterations = ...
+        max(maxFPIterationsRuns);
+
+    maxBEResidual = ...
+        max(maxBEResidualRuns);
+
+    failedCoarse = ...
+        max(failedCoarseRuns);
+
+    %% ====================================================================
+    % ACCURACY
+    % ====================================================================
+
+    uParFinal = Upar(end,:).';
+
+    if any(~isfinite(uParFinal))
+
+        error('Final Parareal solution contains NaN or Inf.');
+
+    end
+
+    finalError = ...
+        gridNorm2D( ...
+            uParFinal-uFineSerial, ...
+            h);
+
+    serialSolutionNorm = ...
+        gridNorm2D( ...
+            uFineSerial, ...
+            h);
+
+    relativeFinalError = ...
+        finalError ...
+        / max(serialSolutionNorm,eps);
+
+    maxPointwiseError = ...
+        max(abs(uParFinal-uFineSerial));
+
+    %% ====================================================================
+    % SPEEDUP
+    % ====================================================================
+
+    speedup = ...
+        serialTimeMedian ...
+        / pararealTimeMedian;
+
+    parallelEfficiency = ...
+        speedup ...
+        / nWorkers;
+
+    timeReduction = ...
+        100.0 ...
+        * (serialTimeMedian-pararealTimeMedian) ...
+        / serialTimeMedian;
+
+    %% ====================================================================
+    % RESULTS
+    % ====================================================================
+
+    fprintf('\n');
+    fprintf('--------------------------------------------------------------------\n');
+    fprintf('RESULT FOR K = %d\n',Kpar);
+    fprintf('--------------------------------------------------------------------\n');
+
+    fprintf('Serial fine RK4 median time     = %.8f s\n', ...
+        serialTimeMedian);
+
+    fprintf('Parareal median wall time       = %.8f s\n', ...
+        pararealTimeMedian);
+
+    fprintf('\n');
+
+    fprintf('Speedup S = Tserial/Tpara       = %.8f\n', ...
+        speedup);
+
+    fprintf('Parallel efficiency E = S/P     = %.8f\n', ...
+        parallelEfficiency);
+
+    fprintf('Parallel efficiency             = %.2f %%\n', ...
+        100.0*parallelEfficiency);
+
+    fprintf('Computational time reduction    = %.2f %%\n', ...
+        timeReduction);
+
+    fprintf('\n');
+
+    fprintf('Final L2 error to serial RK4    = %.12e\n', ...
+        finalError);
+
+    fprintf('Relative final error            = %.12e\n', ...
+        relativeFinalError);
+
+    fprintf('Maximum pointwise error         = %.12e\n', ...
+        maxPointwiseError);
+
+    fprintf('\n');
+
+    fprintf('Initial coarse prediction       = %.8f s\n', ...
+        initialCoarseTime);
+
+    fprintf('All parallel fine phases        = %.8f s\n', ...
+        parallelFineTime);
+
+    fprintf('All serial correction phases    = %.8f s\n', ...
+        serialCorrectionTime);
+
+    fprintf('\n');
+
+    fprintf('Mean fixed-point iterations     = %.4f\n', ...
+        meanFPIterations);
+
+    fprintf('Maximum fixed-point iterations  = %d\n', ...
+        maxFPIterations);
+
+    fprintf('Maximum original BE residual    = %.12e\n', ...
+        maxBEResidual);
+
+    fprintf('Failed BE coarse solves         = %d\n', ...
+        failedCoarse);
+
+    fprintf('\n');
+
+    finePhaseEffectiveSpeedup = ...
+        serialTimeMedian ...
+        / max(parallelFineTime/Kpar,eps);
+
+    fprintf('Effective fine-phase speedup    = %.8f\n', ...
+        finePhaseEffectiveSpeedup);
+
+    fprintf('\n');
+
+    for kk = 1:Kpar
+
+        fprintf( ...
+            'Iteration %d: fine = %.8f s, correction = %.8f s\n', ...
+            kk, ...
+            fineIterationTime(kk), ...
+            correctionIterationTime(kk));
+
+    end
+
+    fprintf('\n');
+
+    fprintf('Serial RK4 mean                 = %.8f s\n', ...
+        serialTimeMean);
+
+    fprintf('Serial RK4 minimum              = %.8f s\n', ...
+        serialTimeMin);
+
+    fprintf('Parareal mean                   = %.8f s\n', ...
+        pararealTimeMean);
+
+    fprintf('Parareal minimum                = %.8f s\n', ...
+        pararealTimeMin);
+
+    fprintf('--------------------------------------------------------------------\n');
+
+    %% ====================================================================
+    % STORE
+    % ====================================================================
+
+    TableK(iK) = Kpar;
+
+    TableSerialTime(iK) = serialTimeMedian;
+
+    TablePararealTime(iK) = pararealTimeMedian;
+
+    TableSpeedup(iK) = speedup;
+
+    TableEfficiency(iK) = ...
+        100.0*parallelEfficiency;
+
+    TableError(iK) = finalError;
+
+    TableRelativeError(iK) = relativeFinalError;
+
+    TableMaxError(iK) = maxPointwiseError;
+
+    TableTimeReduction(iK) = timeReduction;
+
+    TableInitialCoarse(iK) = initialCoarseTime;
+
+    TableParallelFine(iK) = parallelFineTime;
+
+    TableCorrection(iK) = serialCorrectionTime;
+
+    TableMeanFPIterations(iK) = meanFPIterations;
+
+    TableMaxFPIterations(iK) = maxFPIterations;
+
+    TableMaxBEResidual(iK) = maxBEResidual;
+
+    TableFailedCoarse(iK) = failedCoarse;
+
+    if Kpar == Kplot
+
+        uFineSerialForPlot = uFineSerial;
+
+        uParFinalForPlot = uParFinal;
+
+    end
+
+end
+
+%% ========================================================================
+% FINAL TABLE
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('FINAL 2D FISHER-KPP PERFORMANCE TABLE\n');
+fprintf('====================================================================\n');
+
+K = TableK;
+
+Tserial = TableSerialTime;
+
+Tpar = TablePararealTime;
+
+SP = TableSpeedup;
+
+EP_percent = TableEfficiency;
+
+Error = TableError;
+
+RelativeError = TableRelativeError;
+
+MaxError = TableMaxError;
+
+TimeReduction_percent = TableTimeReduction;
+
+InitialCoarse = TableInitialCoarse;
+
+ParallelFine = TableParallelFine;
+
+Correction = TableCorrection;
+
+MeanFPIter = TableMeanFPIterations;
+
+MaxFPIter = TableMaxFPIterations;
+
+MaxBEResidual = TableMaxBEResidual;
+
+FailedCoarse = TableFailedCoarse;
+
+PerformanceTable = ...
+    table( ...
+        K, ...
+        Tserial, ...
+        Tpar, ...
+        SP, ...
+        EP_percent, ...
+        Error, ...
+        RelativeError, ...
+        MaxError, ...
+        TimeReduction_percent, ...
+        InitialCoarse, ...
+        ParallelFine, ...
+        Correction, ...
+        MeanFPIter, ...
+        MaxFPIter, ...
+        MaxBEResidual, ...
+        FailedCoarse);
+
+disp(PerformanceTable);
+
+fprintf('Number of workers P = %d\n',nWorkers);
+
+fprintf('====================================================================\n');
+
+%% ========================================================================
+% COMPACT TABLE
+% ========================================================================
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('COMPACT TABLE FOR THE MANUSCRIPT\n');
+fprintf('====================================================================\n');
+
+CompactTable = ...
+    table( ...
+        K, ...
+        Tserial, ...
+        Tpar, ...
+        SP, ...
+        EP_percent, ...
+        Error);
+
+disp(CompactTable);
+
+fprintf('====================================================================\n');
+
+%% ========================================================================
+% SAVE TABLES
+% ========================================================================
+
+if saveResults
+
+    fullFileName = ...
+        'FisherKPP2D_FixedLU_BE_Parareal_Performance.csv';
+
+    compactFileName = ...
+        'FisherKPP2D_FixedLU_BE_Parareal_Compact.csv';
+
+    writetable( ...
+        PerformanceTable, ...
+        fullFileName);
+
+    writetable( ...
+        CompactTable, ...
+        compactFileName);
+
+    fprintf('\n');
+
+    fprintf('Full table saved to %s\n', ...
+        fullFileName);
+
+    fprintf('Compact table saved to %s\n', ...
+        compactFileName);
+
+end
+
+%% ========================================================================
+% RESTORE THREAD SETTING
+% ========================================================================
+
+maxNumCompThreads(originalClientThreads);
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('THREAD SETTING RESTORED\n');
+fprintf('====================================================================\n');
+
+fprintf('Client thread limit restored    = %d\n', ...
+    maxNumCompThreads);
+
+fprintf('====================================================================\n');
+
+%% ========================================================================
+% PREPARE SOLUTION GRIDS
+% ========================================================================
+
+if isempty(uFineSerialForPlot) || isempty(uParFinalForPlot)
+
+    error('Final solutions for plotting were not stored.');
+
+end
+
+uInitialGrid = zeros(J+1,J+1);
+
+uFineGrid = zeros(J+1,J+1);
+
+uParGrid = zeros(J+1,J+1);
+
+uInitialGrid(2:end-1,2:end-1) = ...
+    reshape(u0,ny,nx);
+
+uFineGrid(2:end-1,2:end-1) = ...
+    reshape(uFineSerialForPlot,ny,nx);
+
+uParGrid(2:end-1,2:end-1) = ...
+    reshape(uParFinalForPlot,ny,nx);
+
+[Xplot,Yplot] = meshgrid(x,y);
+
+%% ========================================================================
+% FIGURE 1
+% ========================================================================
+
+figure(1);
+
+surf( ...
+    Xplot, ...
+    Yplot, ...
+    uInitialGrid, ...
+    'EdgeColor','none');
+
+xlabel('x','FontSize',13);
+
+ylabel('y','FontSize',13);
+
+zlabel('u(x,y,0)','FontSize',13);
+
+title( ...
+    'Initial population distribution', ...
+    'FontSize',14);
+
+view(45,30);
+
+axis tight;
+
+grid on;
+
+box on;
+
+colorbar;
+
+set(gca,'FontSize',12);
+
+% % ========================================================================
+% FIGURE 2
+% %========================================================================
+% 
+% figure(2);
+% 
+% surf( ...
+%     Xplot, ...
+%     Yplot, ...
+%     uFineGrid, ...
+%     'EdgeColor','none');
+% 
+% xlabel('x','FontSize',13);
+% 
+% ylabel('y','FontSize',13);
+% 
+% zlabel('u(x,y,T)','FontSize',13);
+% 
+% title( ...
+%     sprintf( ...
+%         'Serial fine RK4 solution at T = %.2f', ...
+%         T), ...
+%     'FontSize',14);
+% 
+% view(45,30);
+% 
+% axis tight;
+% 
+% grid on;
+% 
+% box on;
+% 
+% colorbar;
+% 
+% set(gca,'FontSize',12);
+% 
+% %% ========================================================================
+% % FIGURE 3
+% % ========================================================================
+% 
+% figure(3);
+% 
+% surf( ...
+%     Xplot, ...
+%     Yplot, ...
+%     uParGrid, ...
+%     'EdgeColor','none');
+% 
+% xlabel('x','FontSize',13);
+% 
+% ylabel('y','FontSize',13);
+% 
+% zlabel('U^K(x,y,T)','FontSize',13);
+% 
+% title( ...
+%     sprintf( ...
+%         'Parareal solution at T = %.2f, K = %d', ...
+%         T,Kplot), ...
+%     'FontSize',14);
+% 
+% view(45,30);
+% 
+% axis tight;
+% 
+% grid on;
+% 
+% box on;
+% 
+% colorbar;
+% 
+% set(gca,'FontSize',12);
+%% ========================================================================
+% FIGURE 2: Serial fine RK4 solution
+% Publication-quality style
+% ========================================================================
+
+figure(2);
+clf;
+
+set(gcf, ...
+    'Color','w', ...
+    'Units','centimeters', ...
+    'Position',[3 3 12.5 9.5]);
+
+surf( ...
+    Xplot, ...
+    Yplot, ...
+    uFineGrid, ...
+    'EdgeColor','none', ...
+    'FaceColor','interp');
+
+% Axis labels: variables in mathematical italic
+xlabel('$x$', ...
+    'Interpreter','latex', ...
+    'FontSize',10);
+
+ylabel('$y$', ...
+    'Interpreter','latex', ...
+    'FontSize',10);
+
+zlabel('$u(x,y,T)$', ...
+    'Interpreter','latex', ...
+    'FontSize',10);
+
+% Figure title
+title( ...
+    sprintf('Serial fine RK4 solution at $T = %.2f$',T), ...
+    'Interpreter','latex', ...
+    'FontSize',10, ...
+    'FontWeight','normal');
+
+% Viewing angle
+view(45,30);
+
+axis tight;
+box on;
+
+% Light grid suitable for journal figures
+grid on;
+
+ax = gca;
+
+set(ax, ...
+    'FontName','Times New Roman', ...
+    'FontSize',9, ...
+    'LineWidth',0.8, ...
+    'TickDir','out', ...
+    'TickLength',[0.015 0.015], ...
+    'XMinorTick','off', ...
+    'YMinorTick','off', ...
+    'ZMinorTick','off');
+
+% Use a perceptually clear colormap
+colormap(parula(256));
+
+% Colorbar
+cb = colorbar;
+
+set(cb, ...
+    'FontName','Times New Roman', ...
+    'FontSize',9, ...
+    'LineWidth',0.8, ...
+    'TickDirection','out');
+
+% Improve layout
+set(gca,'LooseInset', ...
+    max(get(gca,'TightInset'),0.02));
+
+% Optional publication export
+% exportgraphics(gcf,'Fig2_FineRK4.pdf', ...
+%     'ContentType','vector');
+
+
+%% ========================================================================
+% FIGURE 3: Parareal solution
+% Publication-quality style
+% ========================================================================
+
+figure(3);
+clf;
+
+set(gcf, ...
+    'Color','w', ...
+    'Units','centimeters', ...
+    'Position',[3 3 12.5 9.5]);
+
+surf( ...
+    Xplot, ...
+    Yplot, ...
+    uParGrid, ...
+    'EdgeColor','none', ...
+    'FaceColor','interp');
+
+% Axis labels
+xlabel('$x$', ...
+    'Interpreter','latex', ...
+    'FontSize',10);
+
+ylabel('$y$', ...
+    'Interpreter','latex', ...
+    'FontSize',10);
+
+zlabel('$U^{K}(x,y,T)$', ...
+    'Interpreter','latex', ...
+    'FontSize',10);
+
+% Figure title
+title( ...
+    sprintf( ...
+        'Parareal solution at $T = %.2f$, $k = %d$', ...
+        T,Kplot), ...
+    'Interpreter','latex', ...
+    'FontSize',10, ...
+    'FontWeight','normal');
+
+% Viewing angle
+view(45,30);
+
+axis tight;
+box on;
+grid on;
+
+ax = gca;
+
+set(ax, ...
+    'FontName','Times New Roman', ...
+    'FontSize',9, ...
+    'LineWidth',0.8, ...
+    'TickDir','out', ...
+    'TickLength',[0.015 0.015], ...
+    'XMinorTick','off', ...
+    'YMinorTick','off', ...
+    'ZMinorTick','off');
+
+colormap(parula(256));
+
+% Colorbar
+cb = colorbar;
+
+set(cb, ...
+    'FontName','Times New Roman', ...
+    'FontSize',9, ...
+    'LineWidth',0.8, ...
+    'TickDirection','out');
+
+% Improve layout
+set(gca,'LooseInset', ...
+    max(get(gca,'TightInset'),0.02));
+
+% Optional publication export
+% exportgraphics(gcf,'Fig3_Parareal.pdf', ...
+%     'ContentType','vector');
+
+%% ========================================================================
+% FIGURE 4
+% ========================================================================
+
+errorGrid = ...
+    abs(uParGrid-uFineGrid);
+
+figure(4);
+
+surf( ...
+    Xplot, ...
+    Yplot, ...
+    errorGrid, ...
+    'EdgeColor','none');
+
+xlabel('x','FontSize',13);
+
+ylabel('y','FontSize',13);
+
+zlabel('|U^K-u_{fine}|','FontSize',13);
+
+title( ...
+    sprintf( ...
+        'Pointwise error at T = %.2f, k = %d', ...
+        T,Kplot), ...
+    'FontSize',14);
+
+view(45,30);
+
+axis tight;
+
+grid on;
+
+box on;
+
+colorbar;
+
+set(gca,'FontSize',12);
+
+%% ========================================================================
+% FINAL DIAGNOSTICS
+% ========================================================================
+
+finalPlotError = ...
+    gridNorm2D( ...
+        uParFinalForPlot-uFineSerialForPlot, ...
+        h);
+
+finalPlotRelativeError = ...
+    finalPlotError ...
+    / max( ...
+        gridNorm2D(uFineSerialForPlot,h), ...
+        eps);
+
+finalMaxError = ...
+    max( ...
+        abs( ...
+            uParFinalForPlot ...
+            - uFineSerialForPlot));
+
+fprintf('\n');
+fprintf('====================================================================\n');
+fprintf('FINAL SOLUTION DIAGNOSTICS\n');
+fprintf('====================================================================\n');
+
+fprintf('K used for final plots          = %d\n',Kplot);
+
+fprintf('Serial solution minimum         = %.12e\n', ...
+    min(uFineSerialForPlot));
+
+fprintf('Serial solution maximum         = %.12e\n', ...
+    max(uFineSerialForPlot));
+
+fprintf('Parareal solution minimum       = %.12e\n', ...
+    min(uParFinalForPlot));
+
+fprintf('Parareal solution maximum       = %.12e\n', ...
+    max(uParFinalForPlot));
+
+fprintf('\n');
+
+fprintf('Discrete L2 error               = %.12e\n', ...
+    finalPlotError);
+
+fprintf('Relative discrete L2 error      = %.12e\n', ...
+    finalPlotRelativeError);
+
+fprintf('Maximum pointwise error         = %.12e\n', ...
+    finalMaxError);
+
+fprintf('====================================================================\n');
+
+%% ========================================================================
+% ERROR HANDLING
+% ========================================================================
+
+catch ME
+
+    try
+        maxNumCompThreads(originalClientThreads);
+    catch
+    end
+
+    rethrow(ME);
+
+end
+
+%% ========================================================================
+% LOCAL FUNCTIONS
+% ========================================================================
+
+function A = buildDiffusionMatrix2D(J,L,D)
+
+    h = L/J;
+
+    n = J-1;
+
+    e = ones(n,1);
+
+    T1 = ...
+        spdiags( ...
+            [e -2.0*e e], ...
+            [-1 0 1], ...
+            n,n);
+
+    I1 = speye(n);
+
+    Lap2D = ...
+        kron(I1,T1) ...
+        + kron(T1,I1);
+
+    A = ...
+        (D/h^2) ...
+        * Lap2D;
+
+end
+
+% -------------------------------------------------------------------------
+
+function y = serialFineRK4FinalFisher( ...
+    u0,A,r,T,N,Mfine)
+
+    DeltaT = T/N;
+
+    y = u0(:);
+
+    for n = 1:N
+
+        y = ...
+            finePropRK4Fisher( ...
+                y, ...
+                A, ...
+                r, ...
+                DeltaT, ...
+                Mfine);
+
+    end
+
+end
+
+% -------------------------------------------------------------------------
+
+function [Upar,timing] = ...
+    runPararealBE_RK4_ParallelFisherFixedPoint( ...
+        u0,A,r,BEFixedSolver,T,N,Mfine,K, ...
+        fpTol,fpMaxit,usePredictor)
+
+    ndof = numel(u0);
+
+    DeltaT = T/N;
+
+    timing.initialCoarse = 0.0;
+
+    timing.fine = zeros(K,1);
+
+    timing.correction = zeros(K,1);
+
+    % Diagnostics for all coarse BE solves
+    allIterations = [];
+
+    maxResidual = 0.0;
+
+    failedSolves = 0;
+
+    %% --------------------------------------------------------------------
+    % Initial coarse prediction
+    % ---------------------------------------------------------------------
+
+    timerInitial = tic;
+
+    Uold = zeros(N+1,ndof);
+
+    Uold(1,:) = u0(:).';
+
+    GoldStored = zeros(N,ndof);
+
+    for n = 1:N
+
+        v = Uold(n,:).';
+
+        [Gv,info] = ...
+            coarseBackwardEulerFisherFixedPoint( ...
+                v, ...
+                A, ...
+                r, ...
+                DeltaT, ...
+                BEFixedSolver, ...
+                fpTol, ...
+                fpMaxit, ...
+                usePredictor);
+
+        allIterations(end+1,1) = info.iterations;
+
+        maxResidual = ...
+            max(maxResidual,info.residual);
+
+        if ~info.converged
+            failedSolves = failedSolves + 1;
+        end
+
+        Uold(n+1,:) = Gv.';
+
+        GoldStored(n,:) = Gv.';
+
+    end
+
+    timing.initialCoarse = toc(timerInitial);
+
+    %% --------------------------------------------------------------------
+    % Parareal iterations
+    % ---------------------------------------------------------------------
+
+    for k = 1:K
+
+        %% ----------------------------------------------------------------
+        % Parallel fine phase
+        % -----------------------------------------------------------------
+
+        fineOld = zeros(N,ndof);
+
+        timerFine = tic;
+
+        parfor n = 1:N
+
+            vOld = Uold(n,:).';
+
+            Fv = ...
+                finePropRK4Fisher( ...
+                    vOld, ...
+                    A, ...
+                    r, ...
+                    DeltaT, ...
+                    Mfine);
+
+            fineOld(n,:) = Fv.';
+
+        end
+
+        timing.fine(k) = toc(timerFine);
+
+        if any(~isfinite(fineOld(:)))
+
+            error( ...
+                'Parallel fine RK4 produced NaN or Inf.');
+
+        end
+
+        %% ----------------------------------------------------------------
+        % Sequential coarse correction
+        % -----------------------------------------------------------------
+
+        timerCorrection = tic;
+
+        Unew = zeros(N+1,ndof);
+
+        Unew(1,:) = u0(:).';
+
+        GnewStored = zeros(N,ndof);
+
+        for n = 1:N
+
+            vNew = Unew(n,:).';
+
+            [Gnew,info] = ...
+                coarseBackwardEulerFisherFixedPoint( ...
+                    vNew, ...
+                    A, ...
+                    r, ...
+                    DeltaT, ...
+                    BEFixedSolver, ...
+                    fpTol, ...
+                    fpMaxit, ...
+                    usePredictor);
+
+            allIterations(end+1,1) = info.iterations;
+
+            maxResidual = ...
+                max(maxResidual,info.residual);
+
+            if ~info.converged
+                failedSolves = failedSolves + 1;
+            end
+
+            Unew(n+1,:) = ...
+                ( ...
+                    Gnew ...
+                    + fineOld(n,:).' ...
+                    - GoldStored(n,:).' ...
+                ).';
+
+            if any(~isfinite(Unew(n+1,:)))
+
+                error( ...
+                    ['Parareal correction produced NaN or Inf ', ...
+                     'at interval %d, iteration %d.'], ...
+                    n,k);
+
+            end
+
+            GnewStored(n,:) = Gnew.';
+
+        end
+
+        timing.correction(k) = toc(timerCorrection);
+
+        Uold = Unew;
+
+        GoldStored = GnewStored;
+
+    end
+
+    Upar = Uold;
+
+    %% --------------------------------------------------------------------
+    % Diagnostics
+    % ---------------------------------------------------------------------
+
+    if isempty(allIterations)
+
+        timing.meanFPIterations = 0;
+
+        timing.maxFPIterations = 0;
+
+    else
+
+        timing.meanFPIterations = ...
+            mean(allIterations);
+
+        timing.maxFPIterations = ...
+            max(allIterations);
+
+    end
+
+    timing.maxBEResidual = maxResidual;
+
+    timing.failedCoarseSolves = failedSolves;
+
+end
+
+% -------------------------------------------------------------------------
+
+function [y,info] = ...
+    coarseBackwardEulerFisherFixedPoint( ...
+        v,A,r,DeltaT,BEFixedSolver, ...
+        tol,maxit,usePredictor)
+
+    % =====================================================================
+    % Fully implicit Backward Euler equation:
+    %
+    %   y - v - DeltaT*(A*y + r*y.*(1-y)) = 0.
+    %
+    % Fixed-point iteration:
+    %
+    %   (I - DeltaT*A)*y_(m+1)
+    %       = v + DeltaT*r*y_m.*(1-y_m).
+    %
+    % At convergence:
+    %
+    %   (I - DeltaT*A)*y
+    %       = v + DeltaT*r*y.*(1-y),
+    %
+    % which is EXACTLY the fully implicit BE algebraic equation.
+    % =====================================================================
+
+    v = v(:);
+
+    if any(~isfinite(v))
+
+        error('Backward Euler received NaN or Inf.');
+
+    end
+
+    %% --------------------------------------------------------------------
+    % Initial guess
+    % ---------------------------------------------------------------------
+
+    if usePredictor
+
+        % Forward Euler predictor used ONLY as an initial guess.
+        %
+        % This does NOT change the final BE method.
+
+        y = ...
+            v ...
+            + DeltaT ...
+            * ( ...
+                A*v ...
+                + r*v.*(1-v) ...
+            );
+
+    else
+
+        y = v;
+
+    end
+
+    if any(~isfinite(y))
+
+        y = v;
+
+    end
+
+    %% --------------------------------------------------------------------
+    % Check initial residual
+    % ---------------------------------------------------------------------
+
+    R = ...
+        y ...
+        - v ...
+        - DeltaT ...
+        * ( ...
+            A*y ...
+            + r*y.*(1-y) ...
+        );
+
+    residual = norm(R,inf);
+
+    if residual <= tol
+
+        info.converged = true;
+
+        info.iterations = 0;
+
+        info.residual = residual;
+
+        return;
+
+    end
+
+    %% --------------------------------------------------------------------
+    % Fixed-point iteration
+    % ---------------------------------------------------------------------
+
+    converged = false;
+
+    for iter = 1:maxit
+
+        rhs = ...
+            v ...
+            + DeltaT ...
+            * r ...
+            * y.*(1-y);
+
+        ynew = ...
+            BEFixedSolver\rhs;
+
+        if any(~isfinite(ynew))
+
+            error( ...
+                ['Backward Euler fixed-point iteration ', ...
+                 'produced NaN or Inf.']);
+
+        end
+
+        % -------------------------------------------------------------
+        % IMPORTANT:
+        %
+        % Test the ORIGINAL fully implicit BE residual,
+        % not merely ||ynew-y||.
+        % -------------------------------------------------------------
+
+        Rnew = ...
+            ynew ...
+            - v ...
+            - DeltaT ...
+            * ( ...
+                A*ynew ...
+                + r*ynew.*(1-ynew) ...
+            );
+
+        residual = ...
+            norm(Rnew,inf);
+
+        y = ynew;
+
+        if residual <= tol
+
+            converged = true;
+
+            break;
+
+        end
+
+    end
+
+    info.converged = converged;
+
+    info.iterations = iter;
+
+    info.residual = residual;
+
+end
+
+% -------------------------------------------------------------------------
+
+function y = finePropRK4Fisher( ...
+    v,A,r,DeltaT,M)
+
+    dt = DeltaT/M;
+
+    y = v(:);
+
+    for m = 1:M
+
+        y = ...
+            rk4StepFisher( ...
+                y, ...
+                A, ...
+                r, ...
+                dt);
+
+        if any(~isfinite(y))
+
+            error( ...
+                ['Fine RK4 produced NaN or Inf ', ...
+                 'at fine step %d of %d.'], ...
+                m,M);
+
+        end
+
+    end
+
+end
+
+% -------------------------------------------------------------------------
+
+function ynew = rk4StepFisher( ...
+    y,A,r,dt)
+
+    % Fisher-KPP semi-discrete RHS:
+    %
+    %   F(y) = A*y + r*y.*(1-y)
+
+    k1 = ...
+        A*y ...
+        + r*y.*(1-y);
+
+    y2 = ...
+        y ...
+        + 0.5*dt*k1;
+
+    k2 = ...
+        A*y2 ...
+        + r*y2.*(1-y2);
+
+    y3 = ...
+        y ...
+        + 0.5*dt*k2;
+
+    k3 = ...
+        A*y3 ...
+        + r*y3.*(1-y3);
+
+    y4 = ...
+        y ...
+        + dt*k3;
+
+    k4 = ...
+        A*y4 ...
+        + r*y4.*(1-y4);
+
+    ynew = ...
+        y ...
+        + (dt/6.0) ...
+        * ( ...
+            k1 ...
+            + 2.0*k2 ...
+            + 2.0*k3 ...
+            + k4 ...
+        );
+
+end
+
+% -------------------------------------------------------------------------
+
+function nr = gridNorm2D(u,h)
+
+    % Discrete two-dimensional L2 norm:
+    %
+    %   ||u||_h = sqrt(h^2 * sum_ij |u_ij|^2)
+
+    nr = ...
+        sqrt( ...
+            h^2 ...
+            * sum(abs(u).^2) ...
+        );
+
+end
